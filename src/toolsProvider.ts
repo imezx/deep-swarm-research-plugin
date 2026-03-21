@@ -1,0 +1,431 @@
+/**
+ * @file toolsProvider.ts
+ * Registers all four tools with LM Studio.
+ */
+
+import { tool, Tool, ToolsProviderController } from "@lmstudio/sdk";
+import { z } from "zod";
+
+import { configSchematics } from "./config";
+import { runDeepResearch } from "./researcher";
+import { ResearchConfig } from "./types";
+import { searchDDG } from "./net/ddg";
+import { fetchPage } from "./net/http";
+import { extractPage, computeRelevance } from "./net/extractor";
+import { scoreCandidate, rankCandidates } from "./scoring/authority";
+import { sleep } from "./net/http";
+import {
+  MULTI_READ_BATCH_DELAY_MS,
+  CONTENT_LIMIT_MIN,
+  CONTENT_LIMIT_MAX,
+  CONTENT_LIMIT_EXTENDED,
+  CONTENT_LIMIT_DEFAULT,
+  MAX_SOURCES_MIN,
+  MAX_SOURCES_MAX,
+  SEARCH_RESULTS_MIN,
+  SEARCH_RESULTS_MAX,
+} from "./constants";
+
+function readConfig(ctl: ToolsProviderController) {
+  const c = ctl.getPluginConfig(configSchematics);
+  const depth = c.get("researchDepth") as string;
+  return {
+    depthRounds: depth === "shallow" ? 1 : depth === "deep" ? 3 : 2,
+    maxSourcesTotal: (c.get("maxSourcesTotal") as number) || MAX_SOURCES_MAX,
+    contentLimitPerPage:
+      (c.get("contentLimitPerPage") as number) || CONTENT_LIMIT_DEFAULT,
+    enableLinkFollowing: (c.get("enableLinkFollowing") as string) !== "off",
+    enableAIPlanning: (c.get("enableAIPlanning") as string) !== "off",
+    safeSearch:
+      (c.get("safeSearch") as "strict" | "moderate" | "off") || "moderate",
+  } as const;
+}
+
+export async function toolsProvider(
+  ctl: ToolsProviderController,
+): Promise<Tool[]> {
+  const deepResearchTool = tool({
+    name: "Deep Research",
+    description: `Performs autonomous, multi-round deep web research using a Kimi-style Agent Swarm with AI-powered synthesis.
+
+HOW IT WORKS:
+  1. AI TASK DECOMPOSITION: The loaded model analyses the topic and dynamically creates specialised worker agents with roles. Each worker gets custom queries tailored to its assignment.
+
+  2. PARALLEL SWARM EXECUTION: All workers launch simultaneously:
+     • Workers search DuckDuckGo, score candidates by domain authority, fetch pages concurrently
+     • Post-fetch RELEVANCE FILTERING discards off-topic pages
+     • Multi-window content fingerprinting prevents duplicates
+     • Depth and Academic workers follow in-page citations
+
+  3. INTER-AGENT COMMUNICATION: After Round 1, an AI coordinator summarises key findings and suggests follow-up angles for gap-fill workers.
+
+  4. ADAPTIVE GAP-FILL: Coverage gaps are filled by TARGETED workers (e.g., Academic worker for missing evidence, Critical worker for missing controversy) — not just generic breadth searches.
+
+  5. AI NARRATIVE SYNTHESIS: The loaded model writes a coherent, multi-paragraph research analysis with inline citations — not just extracted sentences.
+
+  6. CONTRADICTION DETECTION: The model identifies claims where sources disagree, with severity ratings.
+
+WHAT YOU GET:
+  A structured Markdown report including:
+  - AI-written narrative analysis (primary section)
+  - Cross-source contradictions with severity ratings
+  - Coverage table (upto 12 research dimensions)
+  - Swarm activity summary (sources per worker)
+  - Cross-source consensus detection
+  - Key findings grouped by dimension (detail layer)
+  - Full source details with domain authority, relevance score, and publication date
+  - Numbered citation index
+
+USE THIS TOOL for thorough, cited research. Not for simple lookups.`,
+    parameters: {
+      topic: z
+        .string()
+        .min(3)
+        .describe(
+          "The research topic or question. Be specific. " +
+            "Example: 'long-term safety profile of GLP-1 receptor agonists' rather than just 'weight loss drugs'.",
+        ),
+      focusAreas: z
+        .array(z.string())
+        .max(6)
+        .optional()
+        .describe(
+          "Optional sub-topics or angles to emphasise across all worker queries. " +
+            "Example: ['side effects', 'clinical trial data', 'FDA approval status']",
+        ),
+      depthOverride: z
+        .enum(["shallow", "standard", "deep"])
+        .optional()
+        .describe(
+          "Override depth for this call only. " +
+            "shallow = 1 round (~8 sources, fast) · " +
+            "standard = 2 rounds (~15 sources) · " +
+            "deep = 3 rounds (~25 sources, thorough)",
+        ),
+      maxSourcesOverride: z
+        .number()
+        .int()
+        .min(MAX_SOURCES_MIN)
+        .max(MAX_SOURCES_MAX)
+        .optional()
+        .describe("Override the max-sources cap for this call only."),
+      contentLimitOverride: z
+        .number()
+        .int()
+        .min(CONTENT_LIMIT_MIN)
+        .max(CONTENT_LIMIT_MAX)
+        .optional()
+        .describe(
+          "Override chars-per-page for this call only. " +
+            "Higher = richer context per source but slower overall.",
+        ),
+    },
+
+    implementation: async (
+      {
+        topic,
+        focusAreas,
+        depthOverride,
+        maxSourcesOverride,
+        contentLimitOverride,
+      },
+      { status, warn, signal },
+    ) => {
+      const cfg = readConfig(ctl);
+
+      let depthRounds = cfg.depthRounds;
+      if (depthOverride === "shallow") depthRounds = 1;
+      if (depthOverride === "standard") depthRounds = 2;
+      if (depthOverride === "deep") depthRounds = 3;
+
+      const researchCfg: ResearchConfig = {
+        topic,
+        focusAreas: focusAreas ?? [],
+        depthRounds,
+        maxSourcesTotal: maxSourcesOverride ?? cfg.maxSourcesTotal,
+        contentLimitPerPage: contentLimitOverride ?? cfg.contentLimitPerPage,
+        enableLinkFollowing: cfg.enableLinkFollowing,
+        enableAIPlanning: cfg.enableAIPlanning,
+        safeSearch: cfg.safeSearch,
+      };
+
+      try {
+        const result = await runDeepResearch(researchCfg, status, warn, signal);
+
+        return {
+          topic,
+          totalRounds: result.totalRounds,
+          totalSources: result.totalSources,
+          queriesUsed: result.queriesUsed,
+          coveredDimensions: result.report.coveredDims,
+          gapDimensions: result.report.gapDims,
+          hasAISynthesis: !!result.report.aiSynthesis,
+          contradictions: result.report.contradictions.length,
+          report: result.report.markdown,
+          sourceIndex: result.report.sources.map((s) => ({
+            index: s.index,
+            title: s.title,
+            url: s.url,
+            published: s.published,
+            domainScore: s.domainScore,
+            tier: s.tier,
+            workerRole: s.workerRole,
+            workerLabel: s.workerLabel,
+            relevance: Math.round(s.relevanceScore * 100),
+            excerpt: s.description.slice(0, 200),
+          })),
+        };
+      } catch (err: unknown) {
+        if (isAbortError(err) || signal.aborted)
+          return "Research cancelled by user.";
+        const msg = errorMessage(err);
+        warn(`Deep research error: ${msg}`);
+        return `Error during deep research: ${msg}`;
+      }
+    },
+  });
+
+  const researchSearchTool = tool({
+    name: "Research Search",
+    description:
+      "Search DuckDuckGo and return scored, ranked results with domain authority tiers. " +
+      "Each result includes a domain score (0-100), source tier (academic/government/news/etc.), " +
+      "URL quality score, and freshness estimate. Results are ranked by combined quality. " +
+      "Use this for focused lookups. For full research, use 'Deep Research'.",
+    parameters: {
+      query: z
+        .string()
+        .min(2)
+        .describe(
+          "Search query — use natural language as you would type into a search engine.",
+        ),
+      maxResults: z
+        .number()
+        .int()
+        .min(SEARCH_RESULTS_MIN)
+        .max(SEARCH_RESULTS_MAX)
+        .optional()
+        .describe("Max results to return (default: 8)."),
+    },
+
+    implementation: async ({ query, maxResults }, { status, warn, signal }) => {
+      const cfg = readConfig(ctl);
+      const max = maxResults ?? 8;
+
+      status(`Searching: "${query}"`);
+
+      try {
+        const hits = await searchDDG(query, max, cfg.safeSearch, signal);
+        const scored = hits.map((h) => scoreCandidate(h, query));
+        const ranked = rankCandidates(scored, max);
+
+        status(`Found ${ranked.length} ranked results.`);
+
+        return ranked.map((c, i) => ({
+          rank: i + 1,
+          url: c.url,
+          title: c.title,
+          snippet: c.snippet,
+          domainScore: c.domainScore,
+          freshnessScore: c.freshnessScore,
+          urlQuality: c.urlQuality,
+          totalScore: c.totalScore,
+          tier: c.tier,
+        }));
+      } catch (err: unknown) {
+        if (isAbortError(err) || signal.aborted) return "Search cancelled.";
+        const msg = errorMessage(err);
+        warn(`Search error: ${msg}`);
+        return `Error during search: ${msg}`;
+      }
+    },
+  });
+
+  const researchReadPageTool = tool({
+    name: "Research Read Page",
+    description:
+      "Visit a URL and return cleanly extracted text using Mozilla Readability " +
+      "(the same engine as Firefox Reader Mode). " +
+      "Also returns: title, description, detected publication date, word count, " +
+      "domain authority score, source tier, and top outbound links. " +
+      "Use this to read individual pages. For reading multiple URLs at once use 'Research Multi-Read'.",
+    parameters: {
+      url: z.string().url().describe("The URL to visit and read."),
+      contentLimit: z
+        .number()
+        .int()
+        .min(CONTENT_LIMIT_MIN)
+        .max(CONTENT_LIMIT_EXTENDED)
+        .optional()
+        .describe(
+          "Maximum characters to extract from the page " +
+            "(default: plugin content-per-page setting).",
+        ),
+    },
+
+    implementation: async ({ url, contentLimit }, { status, warn, signal }) => {
+      const cfg = readConfig(ctl);
+      const limit = contentLimit ?? cfg.contentLimitPerPage;
+
+      status(`Reading: ${url}`);
+
+      try {
+        const { html, finalUrl } = await fetchPage(url, signal);
+        const page = extractPage(html, url, finalUrl, limit);
+        const scored = scoreCandidate(
+          { url, title: page.title, snippet: page.description },
+          "",
+        );
+
+        status("Page read successfully.");
+
+        return {
+          url: page.finalUrl,
+          title: page.title,
+          description: page.description,
+          published: page.published,
+          wordCount: page.wordCount,
+          domainScore: scored.domainScore,
+          tier: scored.tier,
+          content: page.text,
+          topLinks: page.outlinks.slice(0, 10).map((l) => ({
+            text: l.text,
+            href: l.href,
+          })),
+        };
+      } catch (err: unknown) {
+        if (isAbortError(err) || signal.aborted) return "Page read cancelled.";
+        const msg = errorMessage(err);
+        warn(`Read error: ${msg}`);
+        return `Error reading page: ${msg}`;
+      }
+    },
+  });
+
+  const researchMultiReadTool = tool({
+    name: "Research Multi-Read",
+    description:
+      "Fetch up to 10 URLs concurrently (3 at a time) and return extracted text " +
+      "and metadata for all of them. Returns domain authority score, publication " +
+      "date, and word count per page. " +
+      "Use this when you already have a list of URLs and want to read them all " +
+      "at once without running a full deep research session.",
+    parameters: {
+      urls: z
+        .array(z.string().url())
+        .min(1)
+        .max(10)
+        .describe("List of URLs to read (1-10)."),
+      contentLimit: z
+        .number()
+        .int()
+        .min(CONTENT_LIMIT_MIN)
+        .max(CONTENT_LIMIT_EXTENDED)
+        .optional()
+        .describe(
+          "Maximum characters to extract per page " +
+            "(default: plugin content-per-page setting).",
+        ),
+    },
+
+    implementation: async (
+      { urls, contentLimit },
+      { status, warn, signal },
+    ) => {
+      const cfg = readConfig(ctl);
+      const limit = contentLimit ?? cfg.contentLimitPerPage;
+
+      status(`Reading ${urls.length} page(s) — 3 at a time…`);
+
+      const CONCURRENCY = 3;
+      const results: Array<{
+        index: number;
+        url: string;
+        title: string;
+        published: string | null;
+        wordCount: number;
+        domainScore: number;
+        tier: string;
+        content: string;
+        error: string | null;
+      }> = [];
+
+      for (let i = 0; i < urls.length; i += CONCURRENCY) {
+        if (signal.aborted) break;
+
+        const batch = urls.slice(i, i + CONCURRENCY);
+        const settled = await Promise.allSettled(
+          batch.map(async (url, bi) => {
+            const { html, finalUrl } = await fetchPage(url, signal);
+            const page = extractPage(html, url, finalUrl, limit);
+            const scored = scoreCandidate(
+              { url, title: page.title, snippet: page.description },
+              "",
+            );
+            return {
+              index: i + bi + 1,
+              url: page.finalUrl,
+              title: page.title,
+              published: page.published,
+              wordCount: page.wordCount,
+              domainScore: scored.domainScore,
+              tier: scored.tier,
+              content: page.text,
+              error: null as string | null,
+            };
+          }),
+        );
+
+        for (let bi = 0; bi < settled.length; bi++) {
+          const outcome = settled[bi];
+          if (outcome.status === "fulfilled") {
+            results.push(outcome.value);
+          } else {
+            const msg = errorMessage(outcome.reason);
+            if (!isAbortError(outcome.reason)) {
+              warn(`Failed to read ${batch[bi]}: ${msg}`);
+            }
+            results.push({
+              index: i + bi + 1,
+              url: batch[bi],
+              title: "",
+              published: null,
+              wordCount: 0,
+              domainScore: 0,
+              tier: "general",
+              content: "",
+              error: msg,
+            });
+          }
+        }
+
+        if (i + CONCURRENCY < urls.length)
+          await sleep(MULTI_READ_BATCH_DELAY_MS);
+      }
+
+      const succeeded = results.filter((r) => r.error === null).length;
+      status(`Done: ${succeeded}/${urls.length} pages read successfully.`);
+
+      if (succeeded === 0) {
+        return "All page reads failed. Verify the URLs are publicly accessible.";
+      }
+
+      return results;
+    },
+  });
+
+  return [
+    deepResearchTool,
+    researchSearchTool,
+    researchReadPageTool,
+    researchMultiReadTool,
+  ];
+}
+
+function isAbortError(err: unknown): boolean {
+  return err instanceof DOMException && err.name === "AbortError";
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err ?? "unknown error");
+}
