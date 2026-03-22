@@ -12,6 +12,7 @@ import {
   FETCH_MAX_RETRIES,
   FETCH_RETRY_DELAY_MS,
   FETCH_TIMEOUT_MS,
+  CACHE_FALLBACK_TIMEOUT_MS,
 } from "../constants";
 
 setServers(DNS_RESOLVERS);
@@ -142,6 +143,21 @@ export async function fetchPage(
   signal: AbortSignal,
   timeoutMs: number = FETCH_TIMEOUT_MS,
 ): Promise<FetchResult> {
+  try {
+    return await fetchDirect(url, signal, timeoutMs);
+  } catch (err: unknown) {
+    const message = errorMessage(err);
+    if (!/bot blocked/i.test(message)) throw err;
+  }
+
+  return fetchFromCache(url, signal);
+}
+
+async function fetchDirect(
+  url: string,
+  signal: AbortSignal,
+  timeoutMs: number,
+): Promise<FetchResult> {
   const headers = buildBrowserHeaders(url);
   let lastError: unknown;
 
@@ -180,9 +196,7 @@ export async function fetchPage(
       clearTimeout(timerId);
       const message = errorMessage(err);
 
-      if (/bot blocked/i.test(message)) {
-        throw new Error(`Failed to fetch ${url}: ${message}`);
-      }
+      if (/bot blocked/i.test(message)) throw err;
 
       const isTls = /altnames|certificate|CERT_|SSL|TLS|self[._-]signed/i.test(
         message,
@@ -206,6 +220,59 @@ export async function fetchPage(
   }
 
   throw new Error(`Failed to fetch ${url}: ${errorMessage(lastError)}`);
+}
+
+async function fetchFromCache(
+  originalUrl: string,
+  signal: AbortSignal,
+): Promise<FetchResult> {
+  const encoded = encodeURIComponent(originalUrl);
+  const headers = buildBrowserHeaders(originalUrl);
+  const timeout = CACHE_FALLBACK_TIMEOUT_MS;
+
+  const cacheUrls = [
+    `https://webcache.googleusercontent.com/search?q=cache:${encoded}&strip=1`,
+    `https://web.archive.org/web/2024/${originalUrl}`,
+  ];
+
+  for (const cacheUrl of cacheUrls) {
+    if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+
+    const timer = new AbortController();
+    const timerId = setTimeout(() => timer.abort(), timeout);
+
+    try {
+      const combined: AbortSignal =
+        typeof (AbortSignal as { any?: (sigs: AbortSignal[]) => AbortSignal })
+          .any === "function"
+          ? (AbortSignal as { any: (sigs: AbortSignal[]) => AbortSignal }).any([
+              signal,
+              timer.signal,
+            ])
+          : timer.signal;
+
+      const res = await fetch(cacheUrl, {
+        method: "GET",
+        signal: combined,
+        headers,
+        redirect: "follow",
+      });
+      clearTimeout(timerId);
+
+      if (res.ok) {
+        const html = await res.text();
+        if (html.length > 500) {
+          return { html, finalUrl: originalUrl };
+        }
+      }
+    } catch {
+      clearTimeout(timerId);
+    }
+  }
+
+  throw new Error(
+    `Failed to fetch ${originalUrl}: bot blocked, cache unavailable`,
+  );
 }
 
 export function safeHostname(url: string): string {

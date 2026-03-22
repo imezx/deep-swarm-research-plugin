@@ -21,6 +21,9 @@ export const FETCH_RETRY_DELAY_MS = 700;
 /** Delay between page fetches within a worker batch (politeness). */
 export const BATCH_INTER_FETCH_DELAY_MS = 400;
 
+/** Timeout for cache/archive fallback attempts on bot-blocked pages. */
+export const CACHE_FALLBACK_TIMEOUT_MS = 10_000;
+
 /** Max concurrent page fetches per worker. */
 export const WORKER_CONCURRENCY = 3;
 
