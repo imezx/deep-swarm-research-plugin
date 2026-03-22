@@ -218,8 +218,6 @@ async function fetchDirect(
       const contentType = res.headers.get("content-type") || "";
       const finalUrl = res.url || url;
 
-      // For binary content types (PDF, etc.), return the raw buffer
-      // so callers can route to the appropriate extractor.
       if (isBinaryContentType(contentType)) {
         const arrayBuf = await res.arrayBuffer();
         const rawBuffer = Buffer.from(arrayBuf);

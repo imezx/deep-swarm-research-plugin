@@ -256,7 +256,8 @@ USE THIS TOOL for thorough, cited research. Not for simple lookups.`,
       "text content and embedded images from the PDF instead of returning garbled bytes. " +
       "Also returns: title, description, detected publication date, word count, " +
       "domain authority score, source tier, and top outbound links. " +
-      "For PDFs, also returns extracted images as base64 data URIs. " +
+      "For PDFs, embedded images are saved to temp files and returned as file paths " +
+      "with dimensions and size metadata (not inline base64). " +
       "Use this to read individual pages. For reading multiple URLs at once use 'Research Multi-Read'.",
     parameters: {
       url: z.string().url().describe("The URL to visit and read."),
@@ -293,7 +294,7 @@ USE THIS TOOL for thorough, cited research. Not for simple lookups.`,
         let images: ReadonlyArray<PdfImage> = [];
 
         if (isPdf && fetchResult.rawBuffer) {
-          status("Found PDF — extracting contents…");
+          status("Found PDF — extracting contents");
           const pdfResult = await extractPdf(
             fetchResult.rawBuffer,
             url,
@@ -309,7 +310,7 @@ USE THIS TOOL for thorough, cited research. Not for simple lookups.`,
           fetchResult.html &&
           fetchResult.html.startsWith("%PDF")
         ) {
-          status("Found PDF — extracting contents…");
+          status("Found PDF — extracting contents");
           const buf = Buffer.from(fetchResult.html, "binary");
           const pdfResult = await extractPdf(
             buf,
@@ -356,10 +357,23 @@ USE THIS TOOL for thorough, cited research. Not for simple lookups.`,
             index: idx + 1,
             page: img.page,
             format: img.format,
-            byteSize: img.byteSize,
-            dataUri: `data:image/${img.format};base64,${img.base64}`,
+            width: img.width,
+            height: img.height,
+            sizeKB: Math.round(img.byteSize / 1024),
+            filePath: img.filePath,
           }));
           result.imageCount = images.length;
+
+          const imageNote = images
+            .map(
+              (img, idx) =>
+                `[Image ${idx + 1} on page ${img.page}: ${img.width}×${img.height}, ${Math.round(img.byteSize / 1024)} KB — saved to ${img.filePath}]`,
+            )
+            .join("\n");
+          result.content =
+            (result.content as string) +
+            "\n\n--- Extracted Images ---\n" +
+            imageNote;
         }
 
         return result;

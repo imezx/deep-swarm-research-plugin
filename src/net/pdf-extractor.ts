@@ -8,6 +8,9 @@
  */
 
 import { PDFParse } from "pdf-parse";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import * as os from "node:os";
 import { ExtractedPage, Outlink } from "../types";
 import { DESCRIPTION_FALLBACK_CHARS } from "../constants";
 
@@ -56,13 +59,11 @@ export function isPdfContentType(
 }
 
 export interface PdfImage {
-  /** 1-based page number where the image was found. */
   readonly page: number;
-  /** Image format (e.g., "png"). */
   readonly format: string;
-  /** Base64-encoded image data (data URL). */
-  readonly base64: string;
-  /** Approximate byte size of the raw image. */
+  readonly filePath: string;
+  readonly width: number;
+  readonly height: number;
   readonly byteSize: number;
 }
 
@@ -87,7 +88,6 @@ export async function extractPdf(
   let creationDate: string | null = null;
 
   try {
-    // Extract metadata
     const info = await parser.getInfo();
     pageCount = info.total || 0;
 
@@ -97,7 +97,6 @@ export async function extractPdf(
       creationDate = extractDateFromPdfInfo(info.info);
     }
 
-    // Extract text
     const textResult = await parser.getText({
       lineEnforce: true,
       lineThreshold: 5,
@@ -122,32 +121,55 @@ export async function extractPdf(
       const imageResult = await parser.getImage({
         imageThreshold: 50,
         imageDataUrl: true,
-        imageBuffer: false,
+        imageBuffer: true,
       } as any);
 
       if (imageResult?.pages) {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pdf-images-"));
+
         for (const page of imageResult.pages) {
           if (images.length >= maxImages) break;
           if (!(page as any).images) continue;
           for (const img of (page as any).images) {
             if (images.length >= maxImages) break;
-            if (!img.dataUrl) continue;
 
-            const match = (img.dataUrl as string).match(
-              /^data:image\/(\w+);base64,(.+)$/,
-            );
-            if (!match) continue;
+            const imgWidth = img.width || 0;
+            const imgHeight = img.height || 0;
+
+            let imgBuffer: Buffer | null = null;
+            let format = "png";
+
+            if (img.data && img.data.length > 0) {
+              imgBuffer = Buffer.from(img.data);
+            } else if (img.dataUrl) {
+              const match = (img.dataUrl as string).match(
+                /^data:image\/(\w+);base64,(.+)$/,
+              );
+              if (match) {
+                format = match[1];
+                imgBuffer = Buffer.from(match[2], "base64");
+              }
+            }
+
+            if (!imgBuffer || imgBuffer.length < 200) continue;
+
+            const fileName = `page${(page as any).pageNumber || 1}_img${images.length + 1}.${format}`;
+            const filePath = path.join(tmpDir, fileName);
+            fs.writeFileSync(filePath, imgBuffer);
 
             images.push({
               page: (page as any).pageNumber || 1,
-              format: match[1],
-              base64: match[2],
-              byteSize: Math.round((match[2].length * 3) / 4),
+              format,
+              filePath,
+              width: imgWidth,
+              height: imgHeight,
+              byteSize: imgBuffer.length,
             });
           }
         }
       }
-    } catch {}
+    } catch {
+    }
   }
 
   await parser.destroy();
