@@ -3,6 +3,9 @@
  * Generates search queries and worker decompositions for the swarm.
  * Supports dynamic AI task decomposition, inter-agent findings summaries,
  * and adaptive gap-fill with targeted worker roles.
+ *
+ * Now accepts a DepthProfile so query counts, worker limits, and
+ * decomposition parameters all scale with the chosen depth preset.
  */
 
 import { LMStudioClient } from "@lmstudio/sdk";
@@ -17,6 +20,7 @@ import {
 } from "../types";
 import { DIMENSIONS, detectGaps, gapFillQueries } from "./dimensions";
 import {
+  DepthProfile,
   AI_PLANNING_MAX_TOKENS,
   AI_PLANNING_TEMPERATURE,
   AI_PLANNING_TIMEOUT_MS,
@@ -28,7 +32,6 @@ import {
   AI_FINDINGS_SUMMARY_TEMPERATURE,
   FINDINGS_SUMMARY_SOURCE_CHARS,
   DECOMPOSITION_MIN_WORKERS,
-  DECOMPOSITION_MAX_WORKERS,
   QUERY_LINE_MIN_LEN,
   QUERY_LINE_MAX_LEN,
 } from "../constants";
@@ -68,7 +71,7 @@ async function callLoadedModel(
   }
 }
 
-function parseLines(raw: string): ReadonlyArray<string> {
+function parseLines(raw: string, maxLines: number = 6): ReadonlyArray<string> {
   return raw
     .split(/\n/)
     .map((line) => line.replace(/^\d+[.)]\s*|^[-*•]\s*/, "").trim())
@@ -77,7 +80,7 @@ function parseLines(raw: string): ReadonlyArray<string> {
         line.length > QUERY_LINE_MIN_LEN && line.length < QUERY_LINE_MAX_LEN,
     )
     .filter((line, idx, arr) => arr.indexOf(line) === idx)
-    .slice(0, 6);
+    .slice(0, maxLines);
 }
 
 const VALID_ROLES: ReadonlyArray<WorkerRole> = [
@@ -86,11 +89,17 @@ const VALID_ROLES: ReadonlyArray<WorkerRole> = [
   "recency",
   "academic",
   "critical",
+  "statistical",
+  "regulatory",
+  "technical",
+  "primary",
+  "comparative",
 ];
 
 function makeDecompositionPrompt(
   topic: string,
   focusAreas: ReadonlyArray<string>,
+  profile: DepthProfile,
 ): string {
   const focus = focusAreas.length
     ? `\nFocus areas: ${focusAreas.join(", ")}`
@@ -100,17 +109,18 @@ function makeDecompositionPrompt(
 Topic: "${topic}"${focus}
 
 Each worker needs:
-- "role": one of "breadth", "depth", "recency", "academic", "critical"
+- "role": one of "breadth", "depth", "recency", "academic", "critical", "statistical", "regulatory", "technical", "primary", "comparative"
 - "label": descriptive name (e.g., "Clinical Evidence Researcher", "Policy Critic")
-- "queries": array of 3-4 specific search queries for this worker
+- "queries": array of ${Math.min(profile.maxQueriesPerWorker, 6)}-${profile.maxQueriesPerWorker} specific search queries for this worker
 - "budgetWeight": number 0.1-0.4 (must sum to ~1.0 across all workers)
 - "followLinks": true/false (true for depth/academic workers)
 - "preferredTiers": optional array of "academic","government","reference","news","professional","general"
 
 Rules:
-- Output ${DECOMPOSITION_MIN_WORKERS} to ${DECOMPOSITION_MAX_WORKERS} workers
+- Output ${DECOMPOSITION_MIN_WORKERS} to ${profile.maxDecompositionWorkers} workers
 - Tailor the workers to THIS specific topic — not generic roles
 - Queries must be highly specific to the topic and each worker's assignment
+- Generate MORE queries for broader or more complex topics
 - Budget weights must roughly sum to 1.0
 - Output ONLY valid JSON, no other text
 
@@ -121,9 +131,10 @@ async function aiDecompose(
   topic: string,
   focusAreas: ReadonlyArray<string>,
   status: StatusFn,
+  profile: DepthProfile,
 ): Promise<ReadonlyArray<DynamicWorkerSpec> | null> {
   const raw = await callLoadedModel(
-    makeDecompositionPrompt(topic, focusAreas),
+    makeDecompositionPrompt(topic, focusAreas, profile),
     AI_DECOMPOSITION_MAX_TOKENS,
     AI_DECOMPOSITION_TEMPERATURE,
     AI_DECOMPOSITION_TIMEOUT_MS,
@@ -139,12 +150,12 @@ async function aiDecompose(
       return null;
 
     const specs: DynamicWorkerSpec[] = [];
-    for (const item of parsed.slice(0, DECOMPOSITION_MAX_WORKERS)) {
+    for (const item of parsed.slice(0, profile.maxDecompositionWorkers)) {
       const role = VALID_ROLES.includes(item.role) ? item.role : "breadth";
       const queries = Array.isArray(item.queries)
         ? item.queries
             .filter((q: unknown) => typeof q === "string" && q.length > 3)
-            .slice(0, 6)
+            .slice(0, profile.maxQueriesPerWorker)
         : [];
       if (queries.length < 2) continue;
 
@@ -185,6 +196,7 @@ function makeRolePlanPrompt(
   role: WorkerRole,
   topic: string,
   focusAreas: ReadonlyArray<string>,
+  profile: DepthProfile,
 ): string {
   const roleDescriptions: Readonly<Record<WorkerRole, string>> = {
     breadth: "broad coverage — many different angles, facts, and sub-topics",
@@ -196,6 +208,16 @@ function makeRolePlanPrompt(
       "academic and scientific sources — peer-reviewed studies, journals, authoritative papers",
     critical:
       "critical analysis — limitations, counterarguments, criticism, controversy, drawbacks",
+    statistical:
+      "statistics and data — numbers, percentages, datasets, surveys, market sizes, quantitative evidence",
+    regulatory:
+      "regulatory and policy — laws, regulations, government policies, compliance, standards, guidelines",
+    technical:
+      "technical deep-dive — implementation details, specifications, architecture, engineering approaches",
+    primary:
+      "primary sources — original reports, official statements, first-hand accounts, press releases, white papers",
+    comparative:
+      "comparative analysis — vs alternatives, head-to-head comparisons, benchmarks, trade-offs, pros and cons",
   };
 
   const focus = focusAreas.length
@@ -208,7 +230,7 @@ Topic: "${topic}"${focus}
 
 This agent's role: ${roleDescriptions[role]}
 
-Generate exactly 4 highly specific, diverse search queries for this role.
+Generate exactly ${profile.maxQueriesPerWorker} highly specific, diverse search queries for this role.
 Rules:
 - Each query must be different from the others
 - Use natural language (as a human would type into a search engine)
@@ -225,12 +247,18 @@ const ROLE_DIMENSIONS: Readonly<Record<WorkerRole, ReadonlyArray<string>>> = {
   recency: ["current", "future"],
   academic: ["evidence", "expert", "mechanism"],
   critical: ["challenges", "controversy", "comparison"],
+  statistical: ["evidence", "economics", "overview"],
+  regulatory: ["challenges", "controversy", "current"],
+  technical: ["mechanism", "applications", "evidence"],
+  primary: ["evidence", "expert", "history"],
+  comparative: ["comparison", "challenges", "applications"],
 };
 
 function dimensionFallbackQueries(
   role: WorkerRole,
   topic: string,
   focusAreas: ReadonlyArray<string>,
+  maxQueries: number,
 ): ReadonlyArray<string> {
   const dimIds = ROLE_DIMENSIONS[role];
   const dims = DIMENSIONS.filter((d) => dimIds.includes(d.id));
@@ -247,7 +275,7 @@ function dimensionFallbackQueries(
     if (!queries.includes(q)) queries.push(q);
   }
 
-  return queries.slice(0, 5);
+  return queries.slice(0, maxQueries);
 }
 
 /** Builds a full QueryPlan using AI decomposition, per-role planning, or dimension fallback. */
@@ -256,33 +284,48 @@ export async function buildQueryPlan(
   focusAreas: ReadonlyArray<string>,
   useAI: boolean,
   status: StatusFn,
+  profile: DepthProfile,
 ): Promise<QueryPlan> {
-  const roles: ReadonlyArray<WorkerRole> = [
+  const CORE_ROLES: ReadonlyArray<WorkerRole> = [
     "breadth",
     "depth",
     "recency",
     "academic",
     "critical",
   ];
+  const EXTENDED_ROLES: ReadonlyArray<WorkerRole> = [
+    "statistical",
+    "regulatory",
+    "technical",
+    "primary",
+    "comparative",
+  ];
+
+  let roles: ReadonlyArray<WorkerRole>;
+  if (profile.depthRounds >= 10) {
+    roles = [...CORE_ROLES, ...EXTENDED_ROLES];
+  } else if (profile.depthRounds >= 5) {
+    roles = [...CORE_ROLES, "technical", "comparative", "statistical"];
+  } else {
+    roles = CORE_ROLES;
+  }
+
   const queriesByRole: Partial<Record<WorkerRole, ReadonlyArray<string>>> = {};
   let usedAI = false;
   let dynamicSpecs: ReadonlyArray<DynamicWorkerSpec> | undefined;
 
   if (useAI) {
     status("AI task decomposition — analysing topic for specialised workers…");
-    const specs = await aiDecompose(topic, focusAreas, status);
+    const specs = await aiDecompose(topic, focusAreas, status, profile);
 
     if (specs && specs.length >= DECOMPOSITION_MIN_WORKERS) {
       dynamicSpecs = specs;
       usedAI = true;
 
       for (const spec of specs) {
-        const existing = queriesByRole[spec.role] ?? [];
-        queriesByRole[spec.role] = [...existing, ...spec.queries];
+        queriesByRole[spec.role] = spec.queries;
       }
-    }
-
-    if (!dynamicSpecs) {
+    } else {
       status("AI planning queries for each swarm worker…");
     }
 
@@ -293,7 +336,7 @@ export async function buildQueryPlan(
         uncoveredRoles.map(async (role) => ({
           role,
           queries: await callLoadedModel(
-            makeRolePlanPrompt(role, topic, focusAreas),
+            makeRolePlanPrompt(role, topic, focusAreas, profile),
           ),
         })),
       );
@@ -302,7 +345,7 @@ export async function buildQueryPlan(
         if (result.status !== "fulfilled") continue;
         const { role, queries: raw } = result.value;
         if (!raw) continue;
-        const parsed = parseLines(raw);
+        const parsed = parseLines(raw, profile.maxQueriesPerWorker);
         if (parsed.length >= AI_MIN_ACCEPTABLE_QUERIES) {
           queriesByRole[role] = parsed;
           usedAI = true;
@@ -321,7 +364,12 @@ export async function buildQueryPlan(
 
   for (const role of roles) {
     if (!queriesByRole[role] || queriesByRole[role]!.length === 0) {
-      queriesByRole[role] = dimensionFallbackQueries(role, topic, focusAreas);
+      queriesByRole[role] = dimensionFallbackQueries(
+        role,
+        topic,
+        focusAreas,
+        profile.maxQueriesPerWorker,
+      );
     }
   }
 
@@ -343,7 +391,7 @@ export async function summariseFindings(
   if (!useAI || sources.length === 0) return [];
 
   const sourceSummaries = sources
-    .slice(0, 12)
+    .slice(0, 20)
     .map(
       (s, i) =>
         `[${i + 1}] ${s.workerLabel}: ${s.title} — ${s.text.slice(0, FINDINGS_SUMMARY_SOURCE_CHARS)}`,
@@ -356,7 +404,7 @@ ${sourceSummaries}
 
 Summarise:
 1. The 3-5 most important findings discovered so far (one line each)
-2. 2-3 specific questions or angles that were NOT covered and need follow-up
+2. 3-5 specific questions or angles that were NOT covered and need follow-up
 
 Output format:
 FINDINGS:
@@ -405,7 +453,7 @@ FOLLOW_UP:
 
   return [
     {
-      fromWorker: "round-1-coordinator",
+      fromWorker: "round-coordinator",
       keyFindings: findings,
       suggestedFollowUps: followUps,
     },
@@ -424,21 +472,21 @@ const GAP_ROLE_MAP: Readonly<
   >
 > = {
   overview: { role: "breadth", followLinks: false },
-  mechanism: { role: "depth", followLinks: true },
+  mechanism: { role: "technical", followLinks: true },
   history: { role: "breadth", followLinks: false },
   current: { role: "recency", followLinks: false },
   applications: { role: "breadth", followLinks: false },
   challenges: { role: "critical", followLinks: false },
-  comparison: { role: "critical", followLinks: false },
+  comparison: { role: "comparative", followLinks: false },
   evidence: {
     role: "academic",
     followLinks: true,
     tiers: ["academic", "government", "reference"],
   },
-  expert: { role: "academic", followLinks: true, tiers: ["academic", "news"] },
+  expert: { role: "primary", followLinks: true, tiers: ["academic", "news"] },
   future: { role: "recency", followLinks: false },
   controversy: { role: "critical", followLinks: false },
-  economics: { role: "breadth", followLinks: false },
+  economics: { role: "statistical", followLinks: false },
 };
 
 /** Generates adaptive gap-fill plans with targeted worker roles per gap. */
@@ -448,6 +496,7 @@ export async function buildAdaptiveGapFill(
   priorMessages: ReadonlyArray<AgentMessage>,
   useAI: boolean,
   status: StatusFn,
+  profile: DepthProfile,
 ): Promise<ReadonlyArray<AdaptiveGapPlan>> {
   const gaps = detectGaps(coveredIds);
   if (gaps.length === 0) {
@@ -489,17 +538,22 @@ export async function buildAdaptiveGapFill(
   if (useAI) {
     const followUpContext = priorMessages
       .flatMap((m) => m.suggestedFollowUps)
-      .slice(0, 4);
+      .slice(0, 6);
 
     const entries = Array.from(byRole.entries());
     const aiResults = await Promise.allSettled(
       entries.map(async ([role, group]) => {
+        const queryCount = Math.min(
+          group.dimLabels.length * 3,
+          profile.maxGapFillQueries,
+        );
         const prompt = `You are a research assistant. A research session on "${topic}" is missing these angles:
 ${group.dimLabels.join(", ")}
 
 ${followUpContext.length > 0 ? `Previous round suggested exploring:\n${followUpContext.join("\n")}\n` : ""}
-Generate ${Math.min(group.dimLabels.length * 2, 5)} specific search queries to fill these gaps.
+Generate ${queryCount} specific search queries to fill these gaps.
 The queries should be best suited for a ${role} research agent.
+Make queries diverse — cover different angles and phrasings.
 Return ONLY the queries, one per line.
 
 Queries:`;
@@ -510,7 +564,7 @@ Queries:`;
     for (const result of aiResults) {
       if (result.status !== "fulfilled" || !result.value.raw) continue;
       const { role, raw } = result.value;
-      const parsed = parseLines(raw);
+      const parsed = parseLines(raw, profile.maxGapFillQueries);
       if (parsed.length >= 2) {
         const group = byRole.get(role);
         if (group) group.queries = [...parsed];
@@ -523,7 +577,7 @@ Queries:`;
     plans.push({
       role,
       label: `Gap-fill: ${group.dimLabels.slice(0, 3).join(", ")}`,
-      queries: group.queries.slice(0, 6),
+      queries: group.queries.slice(0, profile.maxGapFillQueries),
       followLinks: group.followLinks,
       preferredTiers: group.tiers,
     });

@@ -9,6 +9,7 @@ import { z } from "zod";
 import { configSchematics } from "./config";
 import { runDeepResearch } from "./researcher";
 import { ResearchConfig } from "./types";
+import { DepthPreset, getDepthProfile } from "./constants";
 import { searchDDG } from "./net/ddg";
 import { fetchPage } from "./net/http";
 import { extractPage, computeRelevance } from "./net/extractor";
@@ -26,8 +27,6 @@ import {
   CONTENT_LIMIT_MAX,
   CONTENT_LIMIT_EXTENDED,
   CONTENT_LIMIT_DEFAULT,
-  MAX_SOURCES_MIN,
-  MAX_SOURCES_MAX,
   SEARCH_RESULTS_MIN,
   SEARCH_RESULTS_MAX,
 } from "./constants";
@@ -35,11 +34,21 @@ import {
 function readConfig(ctl: ToolsProviderController) {
   const c = ctl.getPluginConfig(configSchematics);
   const depth = c.get("researchDepth") as string;
+  const depthPreset: DepthPreset =
+    depth === "shallow"
+      ? "shallow"
+      : depth === "deep"
+        ? "deep"
+        : depth === "deeper"
+          ? "deeper"
+          : depth === "exhaustive"
+            ? "exhaustive"
+            : "standard";
   return {
-    depthRounds: depth === "shallow" ? 1 : depth === "deep" ? 3 : 2,
-    maxSourcesTotal: (c.get("maxSourcesTotal") as number) || MAX_SOURCES_MAX,
+    depthPreset,
     contentLimitPerPage:
-      (c.get("contentLimitPerPage") as number) || CONTENT_LIMIT_DEFAULT,
+      (c.get("contentLimitPerPage") as number) ||
+      getDepthProfile(depthPreset).defaultContentLimit,
     enableLinkFollowing: (c.get("enableLinkFollowing") as string) !== "off",
     enableAIPlanning: (c.get("enableAIPlanning") as string) !== "off",
     safeSearch:
@@ -65,11 +74,13 @@ HOW IT WORKS:
 
   3. INTER-AGENT COMMUNICATION: After Round 1, an AI coordinator summarises key findings and suggests follow-up angles for gap-fill workers.
 
-  4. ADAPTIVE GAP-FILL: Coverage gaps are filled by TARGETED workers (e.g., Academic worker for missing evidence, Critical worker for missing controversy) — not just generic breadth searches.
+  4. ADAPTIVE GAP-FILL: Coverage gaps are filled by TARGETED workers (e.g., Academic worker for missing evidence, Critical worker for missing controversy).
 
-  5. AI NARRATIVE SYNTHESIS: The loaded model writes a coherent, multi-paragraph research analysis with inline citations — not just extracted sentences.
+  5. ADAPTIVE SOURCE COLLECTION: No hard source cap — each worker has its own page budget that scales with depth preset. Collection stops only when: all research dimensions are covered, a round yields zero new sources (stagnation), or all rounds are exhausted.
 
-  6. CONTRADICTION DETECTION: The model identifies claims where sources disagree, with severity ratings.
+  6. AI NARRATIVE SYNTHESIS: The loaded model writes a coherent, multi-paragraph research analysis with inline citations.
+
+  7. CONTRADICTION DETECTION: The model identifies claims where sources disagree, with severity ratings.
 
 WHAT YOU GET:
   A structured Markdown report including:
@@ -100,21 +111,16 @@ USE THIS TOOL for thorough, cited research. Not for simple lookups.`,
             "Example: ['side effects', 'clinical trial data', 'FDA approval status']",
         ),
       depthOverride: z
-        .enum(["shallow", "standard", "deep"])
+        .enum(["shallow", "standard", "deep", "deeper", "exhaustive"])
         .optional()
         .describe(
           "Override depth for this call only. " +
-            "shallow = 1 round (~8 sources, fast) · " +
-            "standard = 2 rounds (~15 sources) · " +
-            "deep = 3 rounds (~25 sources, thorough)",
+            "shallow = 1 round (~10-25 sources, fast) · " +
+            "standard = 3 rounds (~30-60 sources) · " +
+            "deep = 5 rounds (~60-120 sources, thorough) · " +
+            "deeper = 10 rounds (~100-200+ sources, very thorough) · " +
+            "exhaustive = 15 rounds (200+ sources, maximum depth)",
         ),
-      maxSourcesOverride: z
-        .number()
-        .int()
-        .min(MAX_SOURCES_MIN)
-        .max(MAX_SOURCES_MAX)
-        .optional()
-        .describe("Override the max-sources cap for this call only."),
       contentLimitOverride: z
         .number()
         .int()
@@ -128,27 +134,15 @@ USE THIS TOOL for thorough, cited research. Not for simple lookups.`,
     },
 
     implementation: async (
-      {
-        topic,
-        focusAreas,
-        depthOverride,
-        maxSourcesOverride,
-        contentLimitOverride,
-      },
+      { topic, focusAreas, depthOverride, contentLimitOverride },
       { status, warn, signal },
     ) => {
       const cfg = readConfig(ctl);
 
-      let depthRounds = cfg.depthRounds;
-      if (depthOverride === "shallow") depthRounds = 1;
-      if (depthOverride === "standard") depthRounds = 2;
-      if (depthOverride === "deep") depthRounds = 3;
-
       const researchCfg: ResearchConfig = {
         topic,
         focusAreas: focusAreas ?? [],
-        depthRounds,
-        maxSourcesTotal: maxSourcesOverride ?? cfg.maxSourcesTotal,
+        depthPreset: (depthOverride as DepthPreset) ?? cfg.depthPreset,
         contentLimitPerPage: contentLimitOverride ?? cfg.contentLimitPerPage,
         enableLinkFollowing: cfg.enableLinkFollowing,
         enableAIPlanning: cfg.enableAIPlanning,

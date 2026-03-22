@@ -6,37 +6,33 @@ export const configSchematics = createConfigSchematics()
     "select",
     {
       displayName: "Research Depth",
-      subtitle: "Controls how many adaptive rounds run after the initial swarm",
+      subtitle:
+        "Controls rounds, per-worker budgets, queries, and link-following aggressiveness. " +
+        "Sources are collected adaptively with no hard cap — deeper = more sources.",
       options: [
         {
           value: "shallow",
-          displayName: "Shallow — 1 round, ~8 sources, fast",
+          displayName: "Shallow — 1 round, ~10-25 sources, fast",
         },
         {
           value: "standard",
-          displayName: "Standard — 2 rounds, ~15 sources (recommended)",
+          displayName: "Standard — 3 rounds, ~30-60 sources (recommended)",
         },
         {
           value: "deep",
-          displayName: "Deep — 3 rounds, ~25 sources, thorough",
+          displayName: "Deep — 5 rounds, ~60-120 sources, thorough",
+        },
+        {
+          value: "deeper",
+          displayName: "Deeper — 10 rounds, ~100-200+ sources, very thorough",
+        },
+        {
+          value: "exhaustive",
+          displayName: "Exhaustive — 15 rounds, 200+ sources, maximum depth",
         },
       ],
     },
     "standard",
-  )
-  .field(
-    "maxSourcesTotal",
-    "numeric",
-    {
-      displayName: "Max Sources Total",
-      subtitle:
-        "Hard cap on total pages read across all workers and rounds (8-30)",
-      min: 8,
-      max: 30,
-      int: true,
-      slider: { step: 1, min: 8, max: 30 },
-    },
-    15,
   )
   .field(
     "contentLimitPerPage",
@@ -44,11 +40,12 @@ export const configSchematics = createConfigSchematics()
     {
       displayName: "Content Per Page (chars)",
       subtitle:
-        "Characters extracted per page. Higher = richer but slower (1000-10000)",
+        "Characters extracted per page. Higher = richer but slower. " +
+        "Leave at default to auto-scale with depth preset (1000-20000)",
       min: 1000,
-      max: 10000,
+      max: 20000,
       int: true,
-      slider: { step: 500, min: 1000, max: 10000 },
+      slider: { step: 1000, min: 1000, max: 20000 },
     },
     4000,
   )
@@ -58,7 +55,7 @@ export const configSchematics = createConfigSchematics()
     {
       displayName: "Link Following",
       subtitle:
-        "Depth and Academic workers follow relevant in-page links (like citations)",
+        "Workers follow relevant in-page links (like citations and references)",
       options: [
         { value: "on", displayName: "On — follow top links (recommended)" },
         { value: "off", displayName: "Off — search results only" },

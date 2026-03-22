@@ -7,6 +7,7 @@
 import { runSwarm } from "./swarm/orchestrator";
 import { buildReport } from "./report/builder";
 import { ResearchConfig, ResearchResult, StatusFn, WarnFn } from "./types";
+import { getDepthProfile } from "./constants";
 
 /**
  * Runs a complete deep research session using the swarm architecture.
@@ -17,7 +18,8 @@ export async function runDeepResearch(
   warn: WarnFn,
   signal: AbortSignal,
 ): Promise<ResearchResult> {
-  const swarmResult = await runSwarm(cfg, status, warn, signal);
+  const profile = getDepthProfile(cfg.depthPreset);
+  const swarmResult = await runSwarm(cfg, profile, status, warn, signal);
 
   if (signal.aborted && swarmResult.sources.length === 0) {
     return {
@@ -42,10 +44,11 @@ export async function runDeepResearch(
     swarmResult.sources,
     swarmResult.queriesUsed,
     swarmResult.topicKeywords,
-    cfg.depthRounds,
+    profile.depthRounds,
     swarmResult.usedAI,
     cfg.enableAIPlanning,
     status,
+    profile,
   );
 
   status(
@@ -56,6 +59,6 @@ export async function runDeepResearch(
     report,
     queriesUsed: swarmResult.queriesUsed,
     totalSources: swarmResult.sources.length,
-    totalRounds: cfg.depthRounds,
+    totalRounds: profile.depthRounds,
   };
 }

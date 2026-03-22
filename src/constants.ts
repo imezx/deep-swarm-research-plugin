@@ -2,9 +2,197 @@
  * @file constants.ts
  * All named constants used across the plugin.
  */
+export type DepthPreset =
+  | "shallow"
+  | "standard"
+  | "deep"
+  | "deeper"
+  | "exhaustive";
+
+export interface DepthProfile {
+  readonly depthRounds: number;
+  readonly pageBudgetPerWorker: number;
+  readonly pageBudgetPerGapWorker: number;
+  readonly defaultContentLimit: number;
+  readonly searchResultsPerQuery: number;
+  readonly maxQueriesPerWorker: number;
+  readonly maxPagesPerDomain: number;
+  readonly maxLinksToEvaluate: number;
+  readonly maxLinksToFollow: number;
+  readonly maxOutlinksPerPage: number;
+  readonly candidatePoolMultiplier: number;
+  readonly workerConcurrency: number;
+  readonly maxDecompositionWorkers: number;
+  readonly maxGapFillQueries: number;
+  readonly ddgRateLimitMs: number;
+  readonly minRelevanceScore: number;
+  readonly synthesisMaxSources: number;
+  readonly synthesisSourceChars: number;
+  readonly synthesisMaxTokens: number;
+  readonly contradictionMaxSources: number;
+  readonly stagnationThreshold: number;
+  readonly searchPages: number;
+  readonly searchLanes: number;
+  readonly workerFanOut: number;
+  readonly extraEngines: ReadonlyArray<string>;
+  readonly linkCrawlDepth: number;
+  readonly queryMutationThreshold: number;
+}
+
+export const DEPTH_PROFILES: Readonly<Record<DepthPreset, DepthProfile>> = {
+  shallow: {
+    depthRounds: 1,
+    pageBudgetPerWorker: 5,
+    pageBudgetPerGapWorker: 4,
+    defaultContentLimit: 5_000,
+    searchResultsPerQuery: 8,
+    maxQueriesPerWorker: 4,
+    maxPagesPerDomain: 3,
+    maxLinksToEvaluate: 30,
+    maxLinksToFollow: 3,
+    maxOutlinksPerPage: 30,
+    candidatePoolMultiplier: 3,
+    workerConcurrency: 3,
+    maxDecompositionWorkers: 6,
+    maxGapFillQueries: 5,
+    ddgRateLimitMs: 2_200,
+    minRelevanceScore: 0.15,
+    synthesisMaxSources: 20,
+    synthesisSourceChars: 600,
+    synthesisMaxTokens: 3_000,
+    contradictionMaxSources: 15,
+    stagnationThreshold: 1,
+    searchPages: 1,
+    searchLanes: 2,
+    workerFanOut: 1,
+    extraEngines: [],
+    linkCrawlDepth: 1,
+    queryMutationThreshold: 2,
+  },
+  standard: {
+    depthRounds: 3,
+    pageBudgetPerWorker: 8,
+    pageBudgetPerGapWorker: 6,
+    defaultContentLimit: 6_000,
+    searchResultsPerQuery: 10,
+    maxQueriesPerWorker: 5,
+    maxPagesPerDomain: 4,
+    maxLinksToEvaluate: 50,
+    maxLinksToFollow: 6,
+    maxOutlinksPerPage: 40,
+    candidatePoolMultiplier: 3,
+    workerConcurrency: 3,
+    maxDecompositionWorkers: 8,
+    maxGapFillQueries: 6,
+    ddgRateLimitMs: 2_000,
+    minRelevanceScore: 0.13,
+    synthesisMaxSources: 30,
+    synthesisSourceChars: 600,
+    synthesisMaxTokens: 4_000,
+    contradictionMaxSources: 20,
+    stagnationThreshold: 1,
+    searchPages: 1,
+    searchLanes: 2,
+    workerFanOut: 1,
+    extraEngines: ["brave"],
+    linkCrawlDepth: 1,
+    queryMutationThreshold: 2,
+  },
+  deep: {
+    depthRounds: 5,
+    pageBudgetPerWorker: 12,
+    pageBudgetPerGapWorker: 10,
+    defaultContentLimit: 8_000,
+    searchResultsPerQuery: 15,
+    maxQueriesPerWorker: 7,
+    maxPagesPerDomain: 5,
+    maxLinksToEvaluate: 60,
+    maxLinksToFollow: 10,
+    maxOutlinksPerPage: 60,
+    candidatePoolMultiplier: 4,
+    workerConcurrency: 4,
+    maxDecompositionWorkers: 10,
+    maxGapFillQueries: 8,
+    ddgRateLimitMs: 1_800,
+    minRelevanceScore: 0.1,
+    synthesisMaxSources: 50,
+    synthesisSourceChars: 500,
+    synthesisMaxTokens: 5_000,
+    contradictionMaxSources: 30,
+    stagnationThreshold: 2,
+    searchPages: 2,
+    searchLanes: 3,
+    workerFanOut: 2,
+    extraEngines: ["brave", "searxng"],
+    linkCrawlDepth: 2,
+    queryMutationThreshold: 3,
+  },
+  deeper: {
+    depthRounds: 10,
+    pageBudgetPerWorker: 18,
+    pageBudgetPerGapWorker: 14,
+    defaultContentLimit: 12_000,
+    searchResultsPerQuery: 18,
+    maxQueriesPerWorker: 10,
+    maxPagesPerDomain: 6,
+    maxLinksToEvaluate: 80,
+    maxLinksToFollow: 14,
+    maxOutlinksPerPage: 80,
+    candidatePoolMultiplier: 5,
+    workerConcurrency: 5,
+    maxDecompositionWorkers: 12,
+    maxGapFillQueries: 10,
+    ddgRateLimitMs: 1_500,
+    minRelevanceScore: 0.08,
+    synthesisMaxSources: 70,
+    synthesisSourceChars: 450,
+    synthesisMaxTokens: 6_500,
+    contradictionMaxSources: 40,
+    stagnationThreshold: 2,
+    searchPages: 2,
+    searchLanes: 4,
+    workerFanOut: 2,
+    extraEngines: ["brave", "scholar", "searxng"],
+    linkCrawlDepth: 2,
+    queryMutationThreshold: 3,
+  },
+  exhaustive: {
+    depthRounds: 15,
+    pageBudgetPerWorker: 25,
+    pageBudgetPerGapWorker: 18,
+    defaultContentLimit: 16_000,
+    searchResultsPerQuery: 20,
+    maxQueriesPerWorker: 12,
+    maxPagesPerDomain: 8,
+    maxLinksToEvaluate: 120,
+    maxLinksToFollow: 18,
+    maxOutlinksPerPage: 100,
+    candidatePoolMultiplier: 6,
+    workerConcurrency: 6,
+    maxDecompositionWorkers: 14,
+    maxGapFillQueries: 14,
+    ddgRateLimitMs: 1_200,
+    minRelevanceScore: 0.06,
+    synthesisMaxSources: 100,
+    synthesisSourceChars: 400,
+    synthesisMaxTokens: 8_000,
+    contradictionMaxSources: 60,
+    stagnationThreshold: 3,
+    searchPages: 3,
+    searchLanes: 5,
+    workerFanOut: 3,
+    extraEngines: ["brave", "scholar", "searxng", "mojeek"],
+    linkCrawlDepth: 3,
+    queryMutationThreshold: 4,
+  },
+};
+
+export function getDepthProfile(preset: DepthPreset): DepthProfile {
+  return DEPTH_PROFILES[preset];
+}
 
 /** Milliseconds between DuckDuckGo requests (shared across all swarm workers). */
-export const DDG_RATE_LIMIT_MS = 2_200;
+export const DDG_RATE_LIMIT_MS = 2_000;
 
 /** Per-request fetch timeout in milliseconds. */
 export const FETCH_TIMEOUT_MS = 15_000;
@@ -19,19 +207,19 @@ export const FETCH_MAX_RETRIES = 3;
 export const FETCH_RETRY_DELAY_MS = 700;
 
 /** Delay between page fetches within a worker batch (politeness). */
-export const BATCH_INTER_FETCH_DELAY_MS = 400;
+export const BATCH_INTER_FETCH_DELAY_MS = 300;
 
 /** Timeout for cache/archive fallback attempts on bot-blocked pages. */
 export const CACHE_FALLBACK_TIMEOUT_MS = 10_000;
 
-/** Max concurrent page fetches per worker. */
+/** Max concurrent page fetches per worker (default — overridden by depth profile). */
 export const WORKER_CONCURRENCY = 3;
 
-/** Max pages a single domain may contribute across the whole swarm. */
+/** Max pages a single domain may contribute (default — overridden by depth profile). */
 export const MAX_PAGES_PER_DOMAIN = 3;
 
 /** Minimum word count for a page to be considered useful. */
-export const MIN_USEFUL_WORD_COUNT = 60;
+export const MIN_USEFUL_WORD_COUNT = 50;
 
 /** Max in-page links evaluated for link-following per worker per round. */
 export const MAX_LINKS_TO_EVALUATE = 40;
@@ -204,12 +392,12 @@ export const OUTLINK_TEXT_MAX_LEN = 120;
 export const DNS_RESOLVERS = ["1.1.1.1", "1.0.0.1", "8.8.8.8", "8.8.4.4"];
 
 export const CONTENT_LIMIT_MIN = 1_000;
-export const CONTENT_LIMIT_MAX = 10_000;
+export const CONTENT_LIMIT_MAX = 20_000;
 export const CONTENT_LIMIT_EXTENDED = 20_000;
 export const CONTENT_LIMIT_DEFAULT = 4_000;
 export const MAX_SOURCES_MIN = 5;
-export const MAX_SOURCES_MAX = 30;
-export const MAX_SOURCES_DEFAULT = 15;
+export const MAX_SOURCES_MAX = 200;
+export const MAX_SOURCES_DEFAULT = 25;
 export const SEARCH_RESULTS_MIN = 1;
-export const SEARCH_RESULTS_MAX = 10;
-export const SEARCH_RESULTS_DEFAULT = 8;
+export const SEARCH_RESULTS_MAX = 20;
+export const SEARCH_RESULTS_DEFAULT = 10;

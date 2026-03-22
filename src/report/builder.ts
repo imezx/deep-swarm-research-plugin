@@ -9,12 +9,12 @@ import { CrawledSource } from "../types";
 import {
   CompiledReport,
   ReportSource,
-  WorkerRole,
   ContradictionEntry,
 } from "../types";
 import { DIMENSIONS, detectCoveredDimensions } from "../planning/dimensions";
 import { synthesiseReport, detectContradictions } from "../synthesis/ai";
 import { StatusFn } from "../types";
+import { DepthProfile } from "../constants";
 import {
   MAX_SENTENCE_CHARS,
   IDEAL_SENTENCE_LENGTH,
@@ -163,14 +163,6 @@ function groupByDimension(
   }).filter((g) => g.entries.length > 0);
 }
 
-const ROLE_LABELS: Readonly<Record<WorkerRole, string>> = {
-  breadth: "Breadth",
-  depth: "Depth",
-  recency: "Recency",
-  academic: "Academic",
-  critical: "Critical",
-};
-
 const TIER_BADGES: Readonly<Record<string, string>> = {
   academic: "[academic]",
   government: "[gov]",
@@ -191,6 +183,7 @@ export async function buildReport(
   usedAI: boolean,
   enableAI: boolean,
   status: StatusFn,
+  profile?: DepthProfile,
 ): Promise<CompiledReport> {
   const now = new Date().toUTCString();
 
@@ -230,11 +223,47 @@ export async function buildReport(
   let contradictions: ReadonlyArray<ContradictionEntry> = [];
 
   if (enableAI && sources.length > 0) {
+    const defaultProfile: DepthProfile = {
+      depthRounds: totalRounds,
+      pageBudgetPerWorker: 8,
+      pageBudgetPerGapWorker: 6,
+      defaultContentLimit: 6000,
+      searchResultsPerQuery: 10,
+      maxQueriesPerWorker: 5,
+      maxPagesPerDomain: 4,
+      maxLinksToEvaluate: 50,
+      maxLinksToFollow: 6,
+      maxOutlinksPerPage: 40,
+      candidatePoolMultiplier: 3,
+      workerConcurrency: 3,
+      maxDecompositionWorkers: 8,
+      maxGapFillQueries: 6,
+      ddgRateLimitMs: 2000,
+      minRelevanceScore: 0.13,
+      synthesisMaxSources: 30,
+      synthesisSourceChars: 600,
+      synthesisMaxTokens: 4000,
+      contradictionMaxSources: 20,
+      stagnationThreshold: 1,
+      searchPages: 1,
+      searchLanes: 2,
+      workerFanOut: 1,
+      extraEngines: [],
+      linkCrawlDepth: 1,
+      queryMutationThreshold: 2,
+    };
+    const p = profile ?? defaultProfile;
+
     const [synthResult, contradResult] = await Promise.all([
-      synthesiseReport(topic, sources, coveredLabels, gapLabels, status).catch(
-        () => null,
-      ),
-      detectContradictions(topic, sources, status).catch(
+      synthesiseReport(
+        topic,
+        sources,
+        coveredLabels,
+        gapLabels,
+        status,
+        p,
+      ).catch(() => null),
+      detectContradictions(topic, sources, status, p).catch(
         () => [] as ContradictionEntry[],
       ),
     ]);

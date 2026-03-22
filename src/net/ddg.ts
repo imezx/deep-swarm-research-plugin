@@ -1,8 +1,9 @@
 /**
  * @file net/ddg.ts
- * DuckDuckGo search scraper with a shared, serialised rate limiter.
- * Parses result blocks properly and extracts real snippets.
- * Falls back to the lite endpoint for more reliable markup.
+ * DuckDuckGo search scraper with:
+ * - Multi-lane rate limiters for true parallel searching
+ * - Pagination support (fetch page 2, 3, etc.) for larger result pools
+ * - Falls back to lite → html → legacy parsing chain
  */
 
 import { DDG_RATE_LIMIT_MS } from "../constants";
@@ -40,10 +41,40 @@ export class DdgRateLimiter {
   }
 }
 
+/** Default shared limiter (single lane). */
 export const sharedDdgLimiter = new DdgRateLimiter();
 
 /**
+ * Creates a pool of N independent rate limiters.
+ * Workers round-robin across lanes, so up to N DDG requests
+ * can run truly in parallel instead of being serialized.
+ */
+export class DdgLimiterPool {
+  private readonly limiters: DdgRateLimiter[];
+  private nextIdx = 0;
+
+  constructor(laneCount: number, msPerLane: number) {
+    this.limiters = [];
+    for (let i = 0; i < laneCount; i++) {
+      this.limiters.push(new DdgRateLimiter(msPerLane));
+    }
+  }
+
+  /** Get the next limiter in the round-robin. */
+  next(): DdgRateLimiter {
+    const limiter = this.limiters[this.nextIdx % this.limiters.length];
+    this.nextIdx++;
+    return limiter;
+  }
+
+  get laneCount(): number {
+    return this.limiters.length;
+  }
+}
+
+/**
  * Searches DuckDuckGo via its lite HTML endpoint and returns structured results.
+ * Now supports pagination: set `page` to 2, 3, etc. for subsequent result pages.
  */
 export async function searchDDG(
   query: string,
@@ -51,14 +82,65 @@ export async function searchDDG(
   safeSearch: "strict" | "moderate" | "off",
   signal: AbortSignal,
   limiter: DdgRateLimiter = sharedDdgLimiter,
+  page: number = 1,
 ): Promise<ReadonlyArray<SearchHit>> {
   await limiter.acquire();
   if (signal.aborted) throw new DOMException("Aborted", "AbortError");
 
-  const hits = await tryLiteEndpoint(query, maxResults, safeSearch, signal);
+  const offset = (page - 1) * maxResults;
+  const hits = await tryLiteEndpoint(
+    query,
+    maxResults,
+    safeSearch,
+    signal,
+    offset,
+  );
   if (hits.length > 0) return hits;
 
-  return tryHtmlEndpoint(query, maxResults, safeSearch, signal);
+  if (page <= 1) {
+    return tryHtmlEndpoint(query, maxResults, safeSearch, signal);
+  }
+
+  return [];
+}
+
+/**
+ * Fetch multiple pages of results for a single query.
+ * Returns a combined, deduplicated result set.
+ */
+export async function searchDDGPaginated(
+  query: string,
+  maxResultsPerPage: number,
+  pages: number,
+  safeSearch: "strict" | "moderate" | "off",
+  signal: AbortSignal,
+  limiter: DdgRateLimiter = sharedDdgLimiter,
+): Promise<ReadonlyArray<SearchHit>> {
+  const allHits: SearchHit[] = [];
+  const seen = new Set<string>();
+
+  for (let p = 1; p <= pages; p++) {
+    if (signal.aborted) break;
+
+    const hits = await searchDDG(
+      query,
+      maxResultsPerPage,
+      safeSearch,
+      signal,
+      limiter,
+      p,
+    );
+    for (const h of hits) {
+      if (!seen.has(h.url)) {
+        seen.add(h.url);
+        allHits.push(h);
+      }
+    }
+
+    if (hits.length < maxResultsPerPage * 0.5) break;
+  }
+
+  return allHits;
 }
 
 async function tryLiteEndpoint(
@@ -66,12 +148,18 @@ async function tryLiteEndpoint(
   maxResults: number,
   safeSearch: "strict" | "moderate" | "off",
   signal: AbortSignal,
+  offset: number = 0,
 ): Promise<ReadonlyArray<SearchHit>> {
   try {
     const url = new URL("https://lite.duckduckgo.com/lite/");
     url.searchParams.set("q", query);
     if (safeSearch === "strict") url.searchParams.set("p", "-1");
     if (safeSearch === "off") url.searchParams.set("p", "1");
+
+    let body = `q=${encodeURIComponent(query)}`;
+    if (offset > 0) {
+      body += `&s=${offset}&dc=${Math.floor(offset / maxResults) + 1}`;
+    }
 
     const res = await fetch(url.toString(), {
       method: "POST",
@@ -80,7 +168,7 @@ async function tryLiteEndpoint(
         ...buildDDGHeaders(),
         "Content-Type": "application/x-www-form-urlencoded",
       },
-      body: `q=${encodeURIComponent(query)}`,
+      body,
     });
 
     if (!res.ok) return [];
@@ -113,7 +201,6 @@ async function tryHtmlEndpoint(
   return parseHtmlResults(html, maxResults);
 }
 
-/** Parses the DDG lite endpoint table-row format. */
 function parseLiteResults(
   html: string,
   maxResults: number,
@@ -156,7 +243,6 @@ function parseLiteResults(
   return hits;
 }
 
-/** Parses DDG /html/ using result block extraction with snippet support. */
 function parseHtmlResults(
   html: string,
   maxResults: number,
@@ -209,7 +295,6 @@ function parseHtmlResults(
   return hits;
 }
 
-/** Regex fallback parser when block parsing finds nothing. */
 function parseLegacy(
   html: string,
   maxResults: number,

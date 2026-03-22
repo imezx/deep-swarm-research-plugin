@@ -23,7 +23,12 @@ export const DIMENSIONS: ReadonlyArray<ResearchDimension> = [
       "overview",
       "introduction",
     ],
-    queries: (t) => [`what is ${t}`, `${t} definition and overview`],
+    queries: (t) => [
+      `what is ${t}`,
+      `${t} definition and overview`,
+      `${t} explained simply`,
+      `${t} introduction guide`,
+    ],
   },
   {
     id: "mechanism",
@@ -38,7 +43,12 @@ export const DIMENSIONS: ReadonlyArray<ResearchDimension> = [
       "method",
       "approach",
     ],
-    queries: (t) => [`how does ${t} work`, `${t} mechanism process explained`],
+    queries: (t) => [
+      `how does ${t} work`,
+      `${t} mechanism process explained`,
+      `${t} technical architecture`,
+      `${t} step by step process`,
+    ],
   },
   {
     id: "history",
@@ -53,7 +63,11 @@ export const DIMENSIONS: ReadonlyArray<ResearchDimension> = [
       "timeline",
       "evolution",
     ],
-    queries: (t) => [`${t} history origin development`],
+    queries: (t) => [
+      `${t} history origin development`,
+      `${t} timeline evolution`,
+      `who invented ${t}`,
+    ],
   },
   {
     id: "current",
@@ -73,6 +87,8 @@ export const DIMENSIONS: ReadonlyArray<ResearchDimension> = [
     queries: (t) => [
       `${t} latest news 2025`,
       `${t} current state developments`,
+      `${t} recent updates 2026`,
+      `${t} latest breakthroughs`,
     ],
   },
   {
@@ -91,6 +107,8 @@ export const DIMENSIONS: ReadonlyArray<ResearchDimension> = [
     queries: (t) => [
       `${t} real world applications examples`,
       `${t} use cases industry`,
+      `${t} implementation case studies`,
+      `${t} practical deployment`,
     ],
   },
   {
@@ -110,6 +128,8 @@ export const DIMENSIONS: ReadonlyArray<ResearchDimension> = [
     queries: (t) => [
       `${t} challenges limitations problems`,
       `${t} risks concerns drawbacks`,
+      `${t} common issues failures`,
+      `${t} barriers to adoption`,
     ],
   },
   {
@@ -124,7 +144,12 @@ export const DIMENSIONS: ReadonlyArray<ResearchDimension> = [
       "better than",
       "similar to",
     ],
-    queries: (t) => [`${t} vs alternatives comparison`],
+    queries: (t) => [
+      `${t} vs alternatives comparison`,
+      `${t} compared to competitors`,
+      `best ${t} alternatives`,
+      `${t} benchmark comparison`,
+    ],
   },
   {
     id: "evidence",
@@ -140,7 +165,12 @@ export const DIMENSIONS: ReadonlyArray<ResearchDimension> = [
       "paper",
       "peer-reviewed",
     ],
-    queries: (t) => [`${t} research study evidence peer-reviewed`],
+    queries: (t) => [
+      `${t} research study evidence peer-reviewed`,
+      `${t} scientific data analysis`,
+      `${t} statistics survey data`,
+      `${t} quantitative evidence`,
+    ],
   },
   {
     id: "expert",
@@ -155,7 +185,11 @@ export const DIMENSIONS: ReadonlyArray<ResearchDimension> = [
       "scientist",
       "specialist",
     ],
-    queries: (t) => [`${t} expert opinion analysis`],
+    queries: (t) => [
+      `${t} expert opinion analysis`,
+      `${t} leading researchers views`,
+      `${t} industry expert perspectives`,
+    ],
   },
   {
     id: "future",
@@ -171,7 +205,11 @@ export const DIMENSIONS: ReadonlyArray<ResearchDimension> = [
       "prospect",
       "potential",
     ],
-    queries: (t) => [`${t} future trends predictions`],
+    queries: (t) => [
+      `${t} future trends predictions`,
+      `${t} forecast outlook 2026 2027`,
+      `${t} emerging trends next generation`,
+    ],
   },
   {
     id: "controversy",
@@ -186,7 +224,11 @@ export const DIMENSIONS: ReadonlyArray<ResearchDimension> = [
       "concern",
       "ethical",
     ],
-    queries: (t) => [`${t} criticism controversy ethical debate`],
+    queries: (t) => [
+      `${t} criticism controversy ethical debate`,
+      `${t} opposition arguments against`,
+      `${t} ethical concerns criticism`,
+    ],
   },
   {
     id: "economics",
@@ -202,7 +244,11 @@ export const DIMENSIONS: ReadonlyArray<ResearchDimension> = [
       "growth",
       "industry size",
     ],
-    queries: (t) => [`${t} economic impact market size cost`],
+    queries: (t) => [
+      `${t} economic impact market size cost`,
+      `${t} market growth revenue forecast`,
+      `${t} pricing economics ROI`,
+    ],
   },
 ];
 

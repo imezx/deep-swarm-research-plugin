@@ -1,20 +1,17 @@
 /**
  * @file synthesis/ai.ts
  * AI-powered report synthesis and contradiction detection.
+ * Now accepts depth-profile parameters so synthesis scales with depth.
  */
 
 import { LMStudioClient } from "@lmstudio/sdk";
 import { ReportSource, ContradictionEntry, StatusFn } from "../types";
 import {
-  AI_SYNTHESIS_MAX_TOKENS,
+  DepthProfile,
   AI_SYNTHESIS_TEMPERATURE,
   AI_SYNTHESIS_TIMEOUT_MS,
-  SYNTHESIS_SOURCE_CHARS,
-  SYNTHESIS_MAX_SOURCES,
-  AI_CONTRADICTION_MAX_TOKENS,
   AI_CONTRADICTION_TEMPERATURE,
   AI_CONTRADICTION_TIMEOUT_MS,
-  CONTRADICTION_MAX_SOURCES,
   CONTRADICTION_SOURCE_CHARS,
 } from "../constants";
 
@@ -70,15 +67,9 @@ function prepareSources(
 
 /**
  * Asks the loaded model to write a coherent, well-structured narrative
- * synthesis of the research findings — not just extracted sentences.
+ * synthesis of the research findings.
  *
- * The model receives source summaries and must produce a multi-paragraph
- * analysis that:
- * - Opens with a concise executive summary
- * - Synthesises findings thematically (not source-by-source)
- * - Uses inline citations [1], [2], etc.
- * - Notes areas of agreement and disagreement
- * - Ends with key takeaways
+ * Now scales synthesis output size and input sources with depth profile.
  */
 export async function synthesiseReport(
   topic: string,
@@ -86,20 +77,31 @@ export async function synthesiseReport(
   coveredDims: ReadonlyArray<string>,
   gapDims: ReadonlyArray<string>,
   status: StatusFn,
+  profile: DepthProfile,
 ): Promise<string | null> {
   if (sources.length === 0) return null;
 
-  status("AI synthesis — writing narrative research analysis…");
+  status(
+    `AI synthesis — writing narrative research analysis (${sources.length} sources, up to ${profile.synthesisMaxSources} in prompt)…`,
+  );
 
   const sourceBlock = prepareSources(
     sources,
-    SYNTHESIS_SOURCE_CHARS,
-    SYNTHESIS_MAX_SOURCES,
+    profile.synthesisSourceChars,
+    profile.synthesisMaxSources,
   );
+
+  const paragraphHint =
+    sources.length > 50
+      ? "8-15 paragraphs"
+      : sources.length > 20
+        ? "6-10 paragraphs"
+        : "4-8 paragraphs";
 
   const prompt = `You are an expert research analyst. Write a comprehensive, well-structured narrative synthesis of these research findings.
 
 TOPIC: "${topic}"
+TOTAL SOURCES AVAILABLE: ${sources.length}
 DIMENSIONS COVERED: ${coveredDims.join(", ")}
 ${gapDims.length > 0 ? `GAPS (not fully covered): ${gapDims.join(", ")}` : "All research dimensions covered."}
 
@@ -107,7 +109,7 @@ SOURCES:
 ${sourceBlock}
 
 INSTRUCTIONS:
-1. Write 4-8 paragraphs of coherent analysis — NOT a list of bullet points
+1. Write ${paragraphHint} of coherent analysis — NOT a list of bullet points
 2. Synthesise thematically: group related findings across sources, don't just summarise each source
 3. Use inline citations like [1], [2], [3] when referencing specific sources
 4. Highlight areas where sources AGREE (consensus) and where they DISAGREE (contradictions)
@@ -115,14 +117,20 @@ INSTRUCTIONS:
 6. End with 2-3 key takeaways
 7. Write in a neutral, analytical tone — like a research brief
 8. Do NOT start with "This report" or "This synthesis" — jump straight into the analysis
+9. Be thorough — the user wants comprehensive coverage, not a summary
 
 SYNTHESIS:`;
 
+  const timeoutMs = Math.max(
+    AI_SYNTHESIS_TIMEOUT_MS,
+    AI_SYNTHESIS_TIMEOUT_MS + sources.length * 500,
+  );
+
   const result = await callModel(
     prompt,
-    AI_SYNTHESIS_MAX_TOKENS,
+    profile.synthesisMaxTokens,
     AI_SYNTHESIS_TEMPERATURE,
-    AI_SYNTHESIS_TIMEOUT_MS,
+    timeoutMs,
   );
 
   if (result && result.length > 100) {
@@ -135,22 +143,28 @@ SYNTHESIS:`;
 }
 
 /**
- * Asks the model to identify claims where sources disagree with each other.
- * Returns structured contradiction entries for the report.
+ * Asks the model to identify claims where sources disagree.
+ * Now scales with depth profile.
  */
 export async function detectContradictions(
   topic: string,
   sources: ReadonlyArray<ReportSource>,
   status: StatusFn,
+  profile: DepthProfile,
 ): Promise<ReadonlyArray<ContradictionEntry>> {
   if (sources.length < 3) return [];
 
-  status("Checking for cross-source contradictions…");
+  status("Checking for cross-source contradictions...");
 
   const sourceBlock = prepareSources(
     sources,
     CONTRADICTION_SOURCE_CHARS,
-    CONTRADICTION_MAX_SOURCES,
+    profile.contradictionMaxSources,
+  );
+
+  const maxContradictions = Math.min(
+    10,
+    Math.max(5, Math.floor(sources.length / 5)),
   );
 
   const prompt = `You are a fact-checking analyst. Given these research sources on "${topic}", identify any CONTRADICTIONS — places where two sources make conflicting claims about the same thing.
@@ -165,13 +179,13 @@ Rules:
 - Only report genuine factual contradictions, not stylistic differences
 - SEVERITY: minor = different emphasis, moderate = conflicting data/claims, major = directly opposing conclusions
 - If no contradictions found, output: NONE
-- Maximum 5 contradictions
+- Maximum ${maxContradictions} contradictions
 
 OUTPUT:`;
 
   const raw = await callModel(
     prompt,
-    AI_CONTRADICTION_MAX_TOKENS,
+    Math.max(1500, maxContradictions * 200),
     AI_CONTRADICTION_TEMPERATURE,
     AI_CONTRADICTION_TIMEOUT_MS,
   );

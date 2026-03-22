@@ -53,7 +53,12 @@ export type WorkerRole =
   | "depth"
   | "recency"
   | "academic"
-  | "critical";
+  | "critical"
+  | "statistical"
+  | "regulatory"
+  | "technical"
+  | "primary"
+  | "comparative";
 
 /**
  * The orchestrator generates custom worker specs tailored to each topic.
@@ -78,6 +83,18 @@ export interface SwarmTask {
   readonly followLinks: boolean;
   readonly safeSearch: "strict" | "moderate" | "off";
   readonly preferredTiers?: ReadonlyArray<SourceTier>;
+  readonly searchResultsPerQuery: number;
+  readonly maxPagesPerDomain: number;
+  readonly maxLinksToEvaluate: number;
+  readonly maxLinksToFollow: number;
+  readonly candidatePoolMultiplier: number;
+  readonly workerConcurrency: number;
+  readonly minRelevanceScore: number;
+  readonly maxOutlinksPerPage: number;
+  readonly searchPages: number;
+  readonly extraEngines: ReadonlyArray<string>;
+  readonly linkCrawlDepth: number;
+  readonly queryMutationThreshold: number;
 }
 
 /** Result produced by a single swarm worker. */
@@ -183,8 +200,7 @@ export interface CompiledReport {
 export interface ResearchConfig {
   readonly topic: string;
   readonly focusAreas: ReadonlyArray<string>;
-  readonly depthRounds: number;
-  readonly maxSourcesTotal: number;
+  readonly depthPreset: import("./constants").DepthPreset;
   readonly contentLimitPerPage: number;
   readonly enableLinkFollowing: boolean;
   readonly enableAIPlanning: boolean;
