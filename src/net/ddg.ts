@@ -1,23 +1,80 @@
 /**
  * @file net/ddg.ts
  * DuckDuckGo search scraper with:
- * - Multi-lane rate limiters for true parallel searching
- * - Pagination support (fetch page 2, 3, etc.) for larger result pools
- * - Falls back to lite → html → legacy parsing chain
+ * - Adaptive throttle: shared error counter across all lanes — when DDG
+ *   starts failing, ALL lanes back off exponentially and add jitter
+ * - Global cooldown: after N consecutive failures, pause everything
+ * - Per-lane rate limiting with staggered offsets
+ * - Pagination support
+ * - Query length enforcement (DDG chokes on 100+ char queries)
  */
 
 import { DDG_RATE_LIMIT_MS } from "../constants";
 import { SearchHit } from "../types";
 import { buildDDGHeaders, sleep } from "./http";
 
+/** Max query length sent to DDG — longer queries get trimmed. */
+const MAX_QUERY_LENGTH = 80;
+
+/** Trim a query to fit DDG's sweet spot without cutting mid-word. */
+function trimQuery(query: string): string {
+  if (query.length <= MAX_QUERY_LENGTH) return query;
+  const cut = query.slice(0, MAX_QUERY_LENGTH);
+  const lastSpace = cut.lastIndexOf(" ");
+  return lastSpace > 20 ? cut.slice(0, lastSpace) : cut;
+}
+
+class AdaptiveThrottle {
+  private consecutiveErrors = 0;
+  private cooldownUntil = 0;
+
+  /** Call after a successful DDG response. */
+  reportSuccess(): void {
+    this.consecutiveErrors = Math.max(0, this.consecutiveErrors - 1);
+  }
+
+  /** Call after a failed DDG request. Returns extra delay (ms) to add. */
+  reportError(): number {
+    this.consecutiveErrors++;
+
+    if (this.consecutiveErrors >= 5) {
+      const cooldownMs = Math.min(30_000, this.consecutiveErrors * 3_000);
+      this.cooldownUntil = Date.now() + cooldownMs;
+      return cooldownMs;
+    }
+    return Math.min(15_000, 1000 * Math.pow(2, this.consecutiveErrors - 1));
+  }
+
+  /** Extra delay all lanes should wait right now (0 if no pressure). */
+  currentPenalty(): number {
+    const cooldownRemaining = this.cooldownUntil - Date.now();
+    if (cooldownRemaining > 0) return cooldownRemaining;
+
+    if (this.consecutiveErrors >= 2) {
+      return Math.min(8_000, this.consecutiveErrors * 800);
+    }
+
+    return 0;
+  }
+
+  get errorCount(): number {
+    return this.consecutiveErrors;
+  }
+}
+
+/** Singleton — shared across all lanes and workers in a run. */
+const globalThrottle = new AdaptiveThrottle();
+
 export class DdgRateLimiter {
-  private readonly minDelayMs: number;
+  private readonly baseDelayMs: number;
   private lastRequestAt: number = 0;
   private queue: Array<() => void> = [];
   private processing = false;
+  private readonly jitterMs: number;
 
-  constructor(minDelayMs: number = DDG_RATE_LIMIT_MS) {
-    this.minDelayMs = minDelayMs;
+  constructor(baseDelayMs: number = DDG_RATE_LIMIT_MS) {
+    this.baseDelayMs = baseDelayMs;
+    this.jitterMs = Math.floor(Math.random() * 600);
   }
 
   acquire(): Promise<void> {
@@ -30,9 +87,13 @@ export class DdgRateLimiter {
   private async drain(): Promise<void> {
     this.processing = true;
     while (this.queue.length > 0) {
+      const penalty = globalThrottle.currentPenalty();
+      const effectiveDelay = this.baseDelayMs + this.jitterMs + penalty;
+
       const now = Date.now();
-      const wait = Math.max(0, this.minDelayMs - (now - this.lastRequestAt));
+      const wait = Math.max(0, effectiveDelay - (now - this.lastRequestAt));
       if (wait > 0) await sleep(wait);
+
       this.lastRequestAt = Date.now();
       const resolve = this.queue.shift();
       resolve?.();
@@ -45,9 +106,9 @@ export class DdgRateLimiter {
 export const sharedDdgLimiter = new DdgRateLimiter();
 
 /**
- * Creates a pool of N independent rate limiters.
- * Workers round-robin across lanes, so up to N DDG requests
- * can run truly in parallel instead of being serialized.
+ * Pool of N independent rate limiters with staggered start offsets.
+ * Each lane has its own jitter, and all lanes respect the global
+ * adaptive throttle.
  */
 export class DdgLimiterPool {
   private readonly limiters: DdgRateLimiter[];
@@ -56,11 +117,11 @@ export class DdgLimiterPool {
   constructor(laneCount: number, msPerLane: number) {
     this.limiters = [];
     for (let i = 0; i < laneCount; i++) {
-      this.limiters.push(new DdgRateLimiter(msPerLane));
+      const stagger = Math.floor(msPerLane * 0.2 * i);
+      this.limiters.push(new DdgRateLimiter(msPerLane + stagger));
     }
   }
 
-  /** Get the next limiter in the round-robin. */
   next(): DdgRateLimiter {
     const limiter = this.limiters[this.nextIdx % this.limiters.length];
     this.nextIdx++;
@@ -72,10 +133,12 @@ export class DdgLimiterPool {
   }
 }
 
-/**
- * Searches DuckDuckGo via its lite HTML endpoint and returns structured results.
- * Now supports pagination: set `page` to 2, 3, etc. for subsequent result pages.
- */
+/** Reset adaptive throttle — call at the start of a new research session. */
+export function resetThrottle(): void {
+  (globalThrottle as any).consecutiveErrors = 0;
+  (globalThrottle as any).cooldownUntil = 0;
+}
+
 export async function searchDDG(
   query: string,
   maxResults: number,
@@ -84,21 +147,44 @@ export async function searchDDG(
   limiter: DdgRateLimiter = sharedDdgLimiter,
   page: number = 1,
 ): Promise<ReadonlyArray<SearchHit>> {
+  const trimmed = trimQuery(query);
   await limiter.acquire();
   if (signal.aborted) throw new DOMException("Aborted", "AbortError");
 
   const offset = (page - 1) * maxResults;
-  const hits = await tryLiteEndpoint(
-    query,
-    maxResults,
-    safeSearch,
-    signal,
-    offset,
-  );
-  if (hits.length > 0) return hits;
+
+  try {
+    const hits = await tryLiteEndpoint(
+      trimmed,
+      maxResults,
+      safeSearch,
+      signal,
+      offset,
+    );
+    if (hits.length > 0) {
+      globalThrottle.reportSuccess();
+      return hits;
+    }
+  } catch {}
 
   if (page <= 1) {
-    return tryHtmlEndpoint(query, maxResults, safeSearch, signal);
+    try {
+      const hits = await tryHtmlEndpoint(
+        trimmed,
+        maxResults,
+        safeSearch,
+        signal,
+      );
+      if (hits.length > 0) {
+        globalThrottle.reportSuccess();
+        return hits;
+      }
+    } catch {}
+  }
+
+  const penalty = globalThrottle.reportError();
+  if (penalty > 0 && !signal.aborted) {
+    await sleep(Math.min(penalty, 5_000));
   }
 
   return [];
@@ -106,7 +192,6 @@ export async function searchDDG(
 
 /**
  * Fetch multiple pages of results for a single query.
- * Returns a combined, deduplicated result set.
  */
 export async function searchDDGPaginated(
   query: string,
@@ -121,6 +206,7 @@ export async function searchDDGPaginated(
 
   for (let p = 1; p <= pages; p++) {
     if (signal.aborted) break;
+    if (p > 1 && globalThrottle.errorCount >= 3) break;
 
     const hits = await searchDDG(
       query,
@@ -150,33 +236,29 @@ async function tryLiteEndpoint(
   signal: AbortSignal,
   offset: number = 0,
 ): Promise<ReadonlyArray<SearchHit>> {
-  try {
-    const url = new URL("https://lite.duckduckgo.com/lite/");
-    url.searchParams.set("q", query);
-    if (safeSearch === "strict") url.searchParams.set("p", "-1");
-    if (safeSearch === "off") url.searchParams.set("p", "1");
+  const url = new URL("https://lite.duckduckgo.com/lite/");
+  url.searchParams.set("q", query);
+  if (safeSearch === "strict") url.searchParams.set("p", "-1");
+  if (safeSearch === "off") url.searchParams.set("p", "1");
 
-    let body = `q=${encodeURIComponent(query)}`;
-    if (offset > 0) {
-      body += `&s=${offset}&dc=${Math.floor(offset / maxResults) + 1}`;
-    }
-
-    const res = await fetch(url.toString(), {
-      method: "POST",
-      signal,
-      headers: {
-        ...buildDDGHeaders(),
-        "Content-Type": "application/x-www-form-urlencoded",
-      },
-      body,
-    });
-
-    if (!res.ok) return [];
-    const html = await res.text();
-    return parseLiteResults(html, maxResults);
-  } catch {
-    return [];
+  let body = `q=${encodeURIComponent(query)}`;
+  if (offset > 0) {
+    body += `&s=${offset}&dc=${Math.floor(offset / maxResults) + 1}`;
   }
+
+  const res = await fetch(url.toString(), {
+    method: "POST",
+    signal,
+    headers: {
+      ...buildDDGHeaders(),
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body,
+  });
+
+  if (!res.ok) throw new Error(`DDG lite HTTP ${res.status}`);
+  const html = await res.text();
+  return parseLiteResults(html, maxResults);
 }
 
 async function tryHtmlEndpoint(
@@ -196,7 +278,7 @@ async function tryHtmlEndpoint(
     headers: buildDDGHeaders(),
   });
 
-  if (!res.ok) throw new Error(`DuckDuckGo returned HTTP ${res.status}`);
+  if (!res.ok) throw new Error(`DDG html HTTP ${res.status}`);
   const html = await res.text();
   return parseHtmlResults(html, maxResults);
 }
@@ -233,11 +315,7 @@ function parseLiteResults(
     const { url, title } = links[i];
     if (seen.has(url)) continue;
     seen.add(url);
-    hits.push({
-      url,
-      title,
-      snippet: snippets[i] ?? title,
-    });
+    hits.push({ url, title, snippet: snippets[i] ?? title });
   }
 
   return hits;

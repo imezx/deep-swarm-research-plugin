@@ -26,7 +26,7 @@ import {
   WarnFn,
 } from "../types";
 import { DepthProfile } from "../constants";
-import { DdgRateLimiter, DdgLimiterPool } from "../net/ddg";
+import { DdgRateLimiter, DdgLimiterPool, resetThrottle } from "../net/ddg";
 
 class MutableCrawlState implements SharedCrawlState {
   private readonly _visitedUrls = new Set<string>();
@@ -247,6 +247,8 @@ export async function runSwarm(
   const allQueries: string[] = [];
   const allErrors: string[] = [];
   let usedAI = false;
+
+  resetThrottle();
 
   const pool = new DdgLimiterPool(profile.searchLanes, profile.ddgRateLimitMs);
 

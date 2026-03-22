@@ -264,14 +264,16 @@ function dimensionFallbackQueries(
   const dims = DIMENSIONS.filter((d) => dimIds.includes(d.id));
   const queries: string[] = [];
 
+  const shortTopic = shortenTopic(topic);
+
   for (const dim of dims) {
-    for (const q of dim.queries(topic)) {
+    for (const q of dim.queries(shortTopic)) {
       if (!queries.includes(q)) queries.push(q);
     }
   }
 
   for (const area of focusAreas) {
-    const q = `${topic} ${area}`;
+    const q = `${shortTopic} ${area}`;
     if (!queries.includes(q)) queries.push(q);
   }
 
@@ -517,6 +519,8 @@ export async function buildAdaptiveGapFill(
     }
   >();
 
+  const shortTopic = shortenTopic(topic);
+
   for (const gap of gaps) {
     const mapping = GAP_ROLE_MAP[gap.id] ?? {
       role: "breadth" as WorkerRole,
@@ -531,7 +535,7 @@ export async function buildAdaptiveGapFill(
     };
     existing.dimIds.push(gap.id);
     existing.dimLabels.push(gap.label);
-    existing.queries.push(...gap.queries(topic));
+    existing.queries.push(...gap.queries(shortTopic));
     byRole.set(mapping.role, existing);
   }
 
@@ -605,6 +609,20 @@ const STOP_WORDS = new Set([
   "does",
   "with",
   "from",
+  "that",
+  "could",
+  "which",
+  "about",
+  "their",
+  "this",
+  "these",
+  "those",
+  "would",
+  "should",
+  "current",
+  "hypothetical",
+  "scenarios",
+  "lead",
 ]);
 
 function extractKeywords(topic: string): ReadonlyArray<string> {
@@ -614,4 +632,36 @@ function extractKeywords(topic: string): ReadonlyArray<string> {
     .split(/\s+/)
     .filter((w) => w.length > 2 && !STOP_WORDS.has(w))
     .slice(0, 8);
+}
+
+function shortenTopic(topic: string): string {
+  const colonIdx = topic.indexOf(":");
+  const dashIdx = topic.indexOf(" — ");
+  const sepIdx = colonIdx > 3 ? colonIdx : dashIdx > 3 ? dashIdx : -1;
+
+  let core: string;
+  if (sepIdx > 3 && sepIdx < topic.length * 0.6) {
+    core = topic.slice(0, sepIdx).trim();
+  } else {
+    core = topic;
+  }
+
+  const words = core
+    .replace(/[,;()]/g, " ")
+    .split(/\s+/)
+    .filter((w) => w.length > 1 && !STOP_WORDS.has(w.toLowerCase()));
+
+  let result = "";
+  let count = 0;
+  for (const w of words) {
+    if (count >= 6 || result.length + w.length > 58) break;
+    result += (result ? " " : "") + w;
+    count++;
+  }
+
+  if (result.length < 5) {
+    result = topic.split(/\s+/).slice(0, 5).join(" ");
+  }
+
+  return result;
 }
