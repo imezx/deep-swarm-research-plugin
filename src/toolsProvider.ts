@@ -12,6 +12,12 @@ import { ResearchConfig } from "./types";
 import { searchDDG } from "./net/ddg";
 import { fetchPage } from "./net/http";
 import { extractPage, computeRelevance } from "./net/extractor";
+import {
+  isPdfUrl,
+  isPdfContentType,
+  extractPdf,
+  PdfImage,
+} from "./net/pdf-extractor";
 import { scoreCandidate, rankCandidates } from "./scoring/authority";
 import { sleep } from "./net/http";
 import {
@@ -246,8 +252,11 @@ USE THIS TOOL for thorough, cited research. Not for simple lookups.`,
     description:
       "Visit a URL and return cleanly extracted text using Mozilla Readability " +
       "(the same engine as Firefox Reader Mode). " +
+      "Automatically detects PDF URLs (arXiv, Springer, IEEE, etc.) and extracts " +
+      "text content and embedded images from the PDF instead of returning garbled bytes. " +
       "Also returns: title, description, detected publication date, word count, " +
       "domain authority score, source tier, and top outbound links. " +
+      "For PDFs, also returns extracted images as base64 data URIs. " +
       "Use this to read individual pages. For reading multiple URLs at once use 'Research Multi-Read'.",
     parameters: {
       url: z.string().url().describe("The URL to visit and read."),
@@ -270,16 +279,64 @@ USE THIS TOOL for thorough, cited research. Not for simple lookups.`,
       status(`Reading: ${url}`);
 
       try {
-        const { html, finalUrl } = await fetchPage(url, signal);
-        const page = extractPage(html, url, finalUrl, limit);
+        const fetchResult = await fetchPage(url, signal);
+        const { finalUrl } = fetchResult;
+
+        const isPdf =
+          (fetchResult.rawBuffer &&
+            isPdfContentType(fetchResult.contentType)) ||
+          (!fetchResult.rawBuffer && isPdfUrl(url));
+
+        let page: ReturnType<typeof extractPage> & {
+          images?: ReadonlyArray<PdfImage>;
+        };
+        let images: ReadonlyArray<PdfImage> = [];
+
+        if (isPdf && fetchResult.rawBuffer) {
+          status("Found PDF — extracting contents…");
+          const pdfResult = await extractPdf(
+            fetchResult.rawBuffer,
+            url,
+            finalUrl,
+            limit,
+            true,
+            20,
+          );
+          page = pdfResult;
+          images = pdfResult.images;
+        } else if (
+          isPdf &&
+          fetchResult.html &&
+          fetchResult.html.startsWith("%PDF")
+        ) {
+          status("Found PDF — extracting contents…");
+          const buf = Buffer.from(fetchResult.html, "binary");
+          const pdfResult = await extractPdf(
+            buf,
+            url,
+            finalUrl,
+            limit,
+            true,
+            20,
+          );
+          page = pdfResult;
+          images = pdfResult.images;
+        } else {
+          page = extractPage(fetchResult.html, url, finalUrl, limit);
+        }
+
         const scored = scoreCandidate(
           { url, title: page.title, snippet: page.description },
           "",
         );
 
-        status("Page read successfully.");
+        status(
+          images.length > 0
+            ? `Page read successfully. Extracted ${images.length} image(s).`
+            : "Page read successfully.",
+        );
 
-        return {
+        const result: Record<string, unknown> = {
           url: page.finalUrl,
           title: page.title,
           description: page.description,
@@ -293,6 +350,19 @@ USE THIS TOOL for thorough, cited research. Not for simple lookups.`,
             href: l.href,
           })),
         };
+
+        if (images.length > 0) {
+          result.images = images.map((img, idx) => ({
+            index: idx + 1,
+            page: img.page,
+            format: img.format,
+            byteSize: img.byteSize,
+            dataUri: `data:image/${img.format};base64,${img.base64}`,
+          }));
+          result.imageCount = images.length;
+        }
+
+        return result;
       } catch (err: unknown) {
         if (isAbortError(err) || signal.aborted) return "Page read cancelled.";
         const msg = errorMessage(err);
@@ -306,8 +376,9 @@ USE THIS TOOL for thorough, cited research. Not for simple lookups.`,
     name: "Research Multi-Read",
     description:
       "Fetch up to 10 URLs concurrently (3 at a time) and return extracted text " +
-      "and metadata for all of them. Returns domain authority score, publication " +
-      "date, and word count per page. " +
+      "and metadata for all of them. Automatically handles PDF URLs — extracts " +
+      "clean text instead of returning garbled binary data. Returns domain authority " +
+      "score, publication date, and word count per page. " +
       "Use this when you already have a list of URLs and want to read them all " +
       "at once without running a full deep research session.",
     parameters: {
@@ -356,8 +427,34 @@ USE THIS TOOL for thorough, cited research. Not for simple lookups.`,
         const batch = urls.slice(i, i + CONCURRENCY);
         const settled = await Promise.allSettled(
           batch.map(async (url, bi) => {
-            const { html, finalUrl } = await fetchPage(url, signal);
-            const page = extractPage(html, url, finalUrl, limit);
+            const fetchResult = await fetchPage(url, signal);
+            const { finalUrl } = fetchResult;
+
+            const isPdf =
+              (fetchResult.rawBuffer &&
+                isPdfContentType(fetchResult.contentType)) ||
+              (!fetchResult.rawBuffer && isPdfUrl(url));
+
+            let page;
+            if (isPdf && fetchResult.rawBuffer) {
+              page = await extractPdf(
+                fetchResult.rawBuffer,
+                url,
+                finalUrl,
+                limit,
+                false,
+              );
+            } else if (
+              isPdf &&
+              fetchResult.html &&
+              fetchResult.html.startsWith("%PDF")
+            ) {
+              const buf = Buffer.from(fetchResult.html, "binary");
+              page = await extractPdf(buf, url, finalUrl, limit, false);
+            } else {
+              page = extractPage(fetchResult.html, url, finalUrl, limit);
+            }
+
             const scored = scoreCandidate(
               { url, title: page.title, snippet: page.description },
               "",

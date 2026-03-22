@@ -11,6 +11,7 @@ import {
   contentFingerprint,
   computeRelevance,
 } from "../net/extractor";
+import { isPdfUrl, isPdfContentType, extractPdf } from "../net/pdf-extractor";
 import {
   scoreCandidate,
   rankCandidates,
@@ -308,8 +309,41 @@ async function fetchAndExtract(
   topicKws: ReadonlyArray<string>,
   signal: AbortSignal,
 ): Promise<CrawledSource> {
-  const { html, finalUrl } = await fetchPage(url, signal);
-  const page = extractPage(html, url, finalUrl, task.contentLimit);
+  const fetchResult = await fetchPage(url, signal);
+  const { finalUrl } = fetchResult;
+
+  const isPdf =
+    (fetchResult.rawBuffer && isPdfContentType(fetchResult.contentType)) ||
+    (!fetchResult.rawBuffer && isPdfUrl(url));
+
+  let page;
+  if (isPdf && fetchResult.rawBuffer) {
+    const pdfResult = await extractPdf(
+      fetchResult.rawBuffer,
+      url,
+      finalUrl,
+      task.contentLimit,
+      false,
+    );
+    page = pdfResult;
+  } else if (isPdf && fetchResult.html) {
+    if (fetchResult.html.startsWith("%PDF")) {
+      const buf = Buffer.from(fetchResult.html, "binary");
+      const pdfResult = await extractPdf(
+        buf,
+        url,
+        finalUrl,
+        task.contentLimit,
+        false,
+      );
+      page = pdfResult;
+    } else {
+      page = extractPage(fetchResult.html, url, finalUrl, task.contentLimit);
+    }
+  } else {
+    page = extractPage(fetchResult.html, url, finalUrl, task.contentLimit);
+  }
+
   const { domainScore, freshnessScore, tier } = scoreCandidate(
     { url, title: page.title, snippet: page.description },
     query,

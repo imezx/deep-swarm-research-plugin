@@ -14,11 +14,13 @@
     "@lmstudio/sdk": "^1.5.0",
     "@mozilla/readability": "^0.6.0",
     "jsdom": "^29.0.1",
+    "pdf-parse": "^2.4.5",
     "zod": "^3.25.76"
   },
   "devDependencies": {
     "@types/jsdom": "^21.1.7",
     "@types/node": "^20.14.8",
+    "@types/pdf-parse": "^1.1.5",
     "typescript": "^5.4.5"
   }
 }

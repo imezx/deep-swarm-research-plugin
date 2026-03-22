@@ -69,6 +69,22 @@ export function fetchInsecure(
   signal: AbortSignal,
   redirectsLeft: number = 5,
 ): Promise<string> {
+  return fetchInsecureRaw(url, headers, signal, redirectsLeft).then((r) =>
+    r.data.toString("utf-8"),
+  );
+}
+
+export interface InsecureRawResult {
+  readonly data: Buffer;
+  readonly contentType: string;
+}
+
+export function fetchInsecureRaw(
+  url: string,
+  headers: Record<string, string>,
+  signal: AbortSignal,
+  redirectsLeft: number = 5,
+): Promise<InsecureRawResult> {
   return new Promise((resolve, reject) => {
     let parsed: URL;
     try {
@@ -99,7 +115,7 @@ export function fetchInsecure(
           if (redirectsLeft <= 0)
             return reject(new Error(`Too many redirects from ${url}`));
           res.resume();
-          fetchInsecure(
+          fetchInsecureRaw(
             new URL(location, url).href,
             headers,
             signal,
@@ -113,9 +129,12 @@ export function fetchInsecure(
           return reject(new Error(`HTTP ${sc} from ${url}`));
         }
 
+        const contentType = (res.headers["content-type"] as string) || "";
         const chunks: Buffer[] = [];
         res.on("data", (chunk: Buffer) => chunks.push(chunk));
-        res.on("end", () => resolve(Buffer.concat(chunks).toString("utf-8")));
+        res.on("end", () =>
+          resolve({ data: Buffer.concat(chunks), contentType }),
+        );
         res.on("error", reject);
       },
     );
@@ -136,6 +155,10 @@ export function fetchInsecure(
 export interface FetchResult {
   readonly html: string;
   readonly finalUrl: string;
+  /** The Content-Type header from the response, if available. */
+  readonly contentType?: string;
+  /** Raw response body as a Buffer (present for binary content like PDFs). */
+  readonly rawBuffer?: Buffer;
 }
 
 export async function fetchPage(
@@ -191,7 +214,24 @@ async function fetchDirect(
         }
         throw new Error(`HTTP ${code} ${res.statusText}`);
       }
-      return { html: await res.text(), finalUrl: res.url || url };
+
+      const contentType = res.headers.get("content-type") || "";
+      const finalUrl = res.url || url;
+
+      // For binary content types (PDF, etc.), return the raw buffer
+      // so callers can route to the appropriate extractor.
+      if (isBinaryContentType(contentType)) {
+        const arrayBuf = await res.arrayBuffer();
+        const rawBuffer = Buffer.from(arrayBuf);
+        return {
+          html: "",
+          finalUrl,
+          contentType,
+          rawBuffer,
+        };
+      }
+
+      return { html: await res.text(), finalUrl, contentType };
     } catch (err: unknown) {
       clearTimeout(timerId);
       const message = errorMessage(err);
@@ -204,8 +244,20 @@ async function fetchDirect(
 
       if (isTls) {
         try {
-          const html = await fetchInsecure(url, headers, signal);
-          return { html, finalUrl: url };
+          const raw = await fetchInsecureRaw(url, headers, signal);
+          if (isBinaryContentType(raw.contentType)) {
+            return {
+              html: "",
+              finalUrl: url,
+              contentType: raw.contentType,
+              rawBuffer: raw.data,
+            };
+          }
+          return {
+            html: raw.data.toString("utf-8"),
+            finalUrl: url,
+            contentType: raw.contentType,
+          };
         } catch (tlsErr) {
           lastError = tlsErr;
           break;
@@ -220,6 +272,19 @@ async function fetchDirect(
   }
 
   throw new Error(`Failed to fetch ${url}: ${errorMessage(lastError)}`);
+}
+
+/**
+ * Checks if a Content-Type indicates binary content that should not
+ * be decoded as UTF-8 text.
+ */
+function isBinaryContentType(ct: string): boolean {
+  const lower = ct.toLowerCase();
+  return (
+    lower.includes("application/pdf") ||
+    lower.includes("application/x-pdf") ||
+    lower.includes("application/octet-stream")
+  );
 }
 
 async function fetchFromCache(
