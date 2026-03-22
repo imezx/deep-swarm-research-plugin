@@ -1,4 +1,4 @@
-# Deep Research & Agent
+# Deep Research w/ Swarm Agent
 
 A deep research engine for LM Studio, built around a **Kimi-style Agent Swarm**. Dynamically spawned specialised worker agents run in parallel, coordinating through shared state to produce a comprehensive, cited research report with contradiction detection — in a single tool call.
 

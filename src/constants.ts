@@ -202,7 +202,7 @@ export const DNS_RESOLVERS = ["1.1.1.1", "1.0.0.1", "8.8.8.8", "8.8.4.4"];
 
 export const CONTENT_LIMIT_MIN = 1_000;
 export const CONTENT_LIMIT_MAX = 10_000;
-export const CONTENT_LIMIT_EXTENDED = 15_000;
+export const CONTENT_LIMIT_EXTENDED = 20_000;
 export const CONTENT_LIMIT_DEFAULT = 4_000;
 export const MAX_SOURCES_MIN = 5;
 export const MAX_SOURCES_MAX = 30;
