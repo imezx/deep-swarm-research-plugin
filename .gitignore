@@ -1,0 +1,6 @@
+*.lock
+*.lmstudio
+*-lock.json
+
+dist
+node_modules
