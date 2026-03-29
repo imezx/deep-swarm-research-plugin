@@ -15,6 +15,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as crypto from "node:crypto";
+import { PDFParse } from "pdf-parse";
 
 export interface DocumentChunk {
   readonly id: string;
@@ -49,42 +50,168 @@ export interface LocalSearchHit {
   readonly chunkIndex: number;
 }
 
-const CHUNK_SIZE_CHARS = 1500;
-const CHUNK_OVERLAP_CHARS = 200;
 const MIN_CHUNK_WORDS = 20;
 const MAX_CHUNKS_PER_FILE = 200;
 
 const SUPPORTED_EXTENSIONS = new Set([
-  ".txt", ".md", ".markdown", ".rst", ".org",
-  ".html", ".htm", ".xhtml",
-  ".csv", ".tsv",
-  ".json", ".jsonl",
+  ".pdf",
+  ".txt",
+  ".md",
+  ".markdown",
+  ".rst",
+  ".org",
+  ".html",
+  ".htm",
+  ".xhtml",
+  ".csv",
+  ".tsv",
+  ".json",
+  ".jsonl",
   ".xml",
   ".log",
-  ".yaml", ".yml",
-  ".ini", ".cfg", ".conf",
-  ".tex", ".bib",
-  ".py", ".js", ".ts", ".java", ".c", ".cpp", ".h", ".hpp",
-  ".rs", ".go", ".rb", ".php", ".swift", ".kt", ".scala",
-  ".sh", ".bash", ".zsh", ".ps1",
+  ".yaml",
+  ".yml",
+  ".ini",
+  ".cfg",
+  ".conf",
+  ".tex",
+  ".bib",
+  ".py",
+  ".js",
+  ".ts",
+  ".java",
+  ".c",
+  ".cpp",
+  ".h",
+  ".hpp",
+  ".rs",
+  ".go",
+  ".rb",
+  ".php",
+  ".swift",
+  ".kt",
+  ".scala",
+  ".sh",
+  ".bash",
+  ".zsh",
+  ".ps1",
   ".sql",
-  ".r", ".R",
-  ".css", ".scss", ".less",
+  ".r",
+  ".R",
+  ".css",
+  ".scss",
+  ".less",
 ]);
 
 const STOP_WORDS = new Set([
-  "the", "a", "an", "is", "in", "of", "and", "or", "for", "to", "how",
-  "what", "why", "when", "does", "with", "from", "that", "this", "these",
-  "those", "would", "should", "could", "which", "about", "their", "its",
-  "are", "was", "were", "been", "being", "have", "has", "had", "having",
-  "do", "did", "doing", "will", "shall", "may", "might", "can", "must",
-  "not", "no", "nor", "but", "if", "then", "else", "so", "than",
-  "too", "very", "just", "only", "also", "more", "most", "some", "any",
-  "each", "every", "all", "both", "few", "many", "much", "such",
-  "own", "same", "other", "into", "over", "after", "before", "between",
-  "under", "above", "below", "up", "down", "out", "off", "on", "at",
-  "by", "as", "be", "it", "he", "she", "we", "they", "me", "him",
-  "her", "us", "them", "my", "your", "his", "our", "you", "i",
+  "the",
+  "a",
+  "an",
+  "is",
+  "in",
+  "of",
+  "and",
+  "or",
+  "for",
+  "to",
+  "how",
+  "what",
+  "why",
+  "when",
+  "does",
+  "with",
+  "from",
+  "that",
+  "this",
+  "these",
+  "those",
+  "would",
+  "should",
+  "could",
+  "which",
+  "about",
+  "their",
+  "its",
+  "are",
+  "was",
+  "were",
+  "been",
+  "being",
+  "have",
+  "has",
+  "had",
+  "having",
+  "do",
+  "did",
+  "doing",
+  "will",
+  "shall",
+  "may",
+  "might",
+  "can",
+  "must",
+  "not",
+  "no",
+  "nor",
+  "but",
+  "if",
+  "then",
+  "else",
+  "so",
+  "than",
+  "too",
+  "very",
+  "just",
+  "only",
+  "also",
+  "more",
+  "most",
+  "some",
+  "any",
+  "each",
+  "every",
+  "all",
+  "both",
+  "few",
+  "many",
+  "much",
+  "such",
+  "own",
+  "same",
+  "other",
+  "into",
+  "over",
+  "after",
+  "before",
+  "between",
+  "under",
+  "above",
+  "below",
+  "up",
+  "down",
+  "out",
+  "off",
+  "on",
+  "at",
+  "by",
+  "as",
+  "be",
+  "it",
+  "he",
+  "she",
+  "we",
+  "they",
+  "me",
+  "him",
+  "her",
+  "us",
+  "them",
+  "my",
+  "your",
+  "his",
+  "our",
+  "you",
+  "i",
 ]);
 
 function tokenize(text: string): string[] {
@@ -103,12 +230,13 @@ function computeTermFrequencies(tokens: string[]): Map<string, number> {
   return freq;
 }
 
-function chunkText(text: string): string[] {
+function chunkText(text: string, chunkSize: number): string[] {
+  const overlap = Math.round(chunkSize * 0.1);
   const chunks: string[] = [];
   let offset = 0;
 
   while (offset < text.length && chunks.length < MAX_CHUNKS_PER_FILE) {
-    const end = Math.min(offset + CHUNK_SIZE_CHARS, text.length);
+    const end = Math.min(offset + chunkSize, text.length);
     let slice = text.slice(offset, end);
 
     if (end < text.length) {
@@ -117,7 +245,7 @@ function chunkText(text: string): string[] {
         slice.lastIndexOf(". "),
         slice.lastIndexOf(".\n"),
       );
-      if (lastBreak > CHUNK_SIZE_CHARS * 0.3) {
+      if (lastBreak > chunkSize * 0.3) {
         slice = slice.slice(0, lastBreak + 1);
       }
     }
@@ -127,7 +255,7 @@ function chunkText(text: string): string[] {
       chunks.push(trimmed);
     }
 
-    offset += Math.max(slice.length - CHUNK_OVERLAP_CHARS, 1);
+    offset += Math.max(slice.length - overlap, 1);
   }
 
   return chunks;
@@ -148,9 +276,41 @@ function stripHtmlTags(html: string): string {
     .trim();
 }
 
-function readFileAsText(filePath: string): string | null {
+function cleanPdfText(raw: string): string {
+  return (
+    raw
+      .replace(/\r\n/g, "\n")
+      .replace(/\r/g, "\n")
+      .replace(/^--\s*\d+\s*of\s*\d+\s*--\s*$/gm, "")
+      .replace(/(\w)-\n(\w)/g, "$1$2")
+      .replace(/[ \t]+/g, " ")
+      .replace(/\n{3,}/g, "\n\n")
+      .replace(/^\s*\d{1,4}\s*$/gm, "")
+      .trim()
+  );
+}
+
+async function readFileAsText(filePath: string): Promise<string | null> {
   try {
     const ext = path.extname(filePath).toLowerCase();
+
+    if (ext === ".pdf") {
+      try {
+        const buffer = fs.readFileSync(filePath);
+        const data = new Uint8Array(buffer);
+        const parser = new PDFParse({ data } as any);
+        const result = await parser.getText({
+          lineEnforce: true,
+          lineThreshold: 5,
+        });
+        await parser.destroy();
+        const raw = result.text || "";
+        return cleanPdfText(raw);
+      } catch {
+        return null;
+      }
+    }
+
     const raw = fs.readFileSync(filePath, "utf-8");
 
     if (ext === ".html" || ext === ".htm" || ext === ".xhtml") {
@@ -226,11 +386,12 @@ export class LocalDocumentStore {
     return this.collections.size > 0;
   }
 
-  indexCollection(
+  async indexCollection(
     name: string,
     folderPath: string,
+    chunkSize: number,
     onProgress?: (message: string) => void,
-  ): LocalCollection {
+  ): Promise<LocalCollection> {
     const resolvedPath = path.resolve(folderPath);
 
     if (!fs.existsSync(resolvedPath)) {
@@ -260,10 +421,10 @@ export class LocalDocumentStore {
     let indexedFiles = 0;
 
     for (const filePath of files) {
-      const text = readFileAsText(filePath);
+      const text = await readFileAsText(filePath);
       if (!text || text.trim().length < 50) continue;
 
-      const textChunks = chunkText(text);
+      const textChunks = chunkText(text, chunkSize);
       const fileName = path.relative(resolvedPath, filePath);
 
       for (let ci = 0; ci < textChunks.length; ci++) {
@@ -351,6 +512,37 @@ export class LocalDocumentStore {
     this.rebuildIdf();
 
     return true;
+  }
+
+  listAll(
+    maxResults: number = 100,
+    collectionIds?: ReadonlyArray<string>,
+  ): ReadonlyArray<LocalSearchHit> {
+    const targetCollections = collectionIds
+      ? new Set(collectionIds)
+      : undefined;
+    const results: LocalSearchHit[] = [];
+
+    for (const chunk of this.chunks.values()) {
+      if (results.length >= maxResults) break;
+      if (targetCollections && !targetCollections.has(chunk.collectionId))
+        continue;
+
+      const collection = this.collections.get(chunk.collectionId);
+      results.push({
+        chunkId: chunk.id,
+        collectionId: chunk.collectionId,
+        collectionName: collection?.name ?? "unknown",
+        filePath: chunk.filePath,
+        fileName: chunk.fileName,
+        text: chunk.text,
+        wordCount: chunk.wordCount,
+        score: 0,
+        chunkIndex: chunk.chunkIndex,
+      });
+    }
+
+    return results;
   }
 
   search(

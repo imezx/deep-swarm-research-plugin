@@ -31,10 +31,7 @@ import {
   SEARCH_RESULTS_MAX,
 } from "./constants";
 
-import {
-  getGlobalStore,
-  LocalCollection,
-} from "./local/store";
+import { getGlobalStore, LocalCollection } from "./local/store";
 import { isLocalUrl } from "./local/search";
 
 function readConfig(ctl: ToolsProviderController) {
@@ -110,7 +107,7 @@ When Local Document Sources is enabled in settings, your indexed local collectio
         .min(3)
         .describe(
           "The research topic or question. Be specific. " +
-          "Example: 'long-term safety profile of GLP-1 receptor agonists' rather than just 'weight loss drugs'.",
+            "Example: 'long-term safety profile of GLP-1 receptor agonists' rather than just 'weight loss drugs'.",
         ),
       focusAreas: z
         .array(z.string())
@@ -118,18 +115,18 @@ When Local Document Sources is enabled in settings, your indexed local collectio
         .optional()
         .describe(
           "Optional sub-topics or angles to emphasise across all worker queries. " +
-          "Example: ['side effects', 'clinical trial data', 'FDA approval status']",
+            "Example: ['side effects', 'clinical trial data', 'FDA approval status']",
         ),
       depthOverride: z
         .enum(["shallow", "standard", "deep", "deeper", "exhaustive"])
         .optional()
         .describe(
           "Override depth for this call only. " +
-          "shallow = 1 round (~10-25 sources, fast) · " +
-          "standard = 3 rounds (~30-60 sources) · " +
-          "deep = 5 rounds (~60-120 sources, thorough) · " +
-          "deeper = 10 rounds (~100-200+ sources, very thorough) · " +
-          "exhaustive = 15 rounds (200+ sources, maximum depth)",
+            "shallow = 1 round (~10-25 sources, fast) · " +
+            "standard = 3 rounds (~30-60 sources) · " +
+            "deep = 5 rounds (~60-120 sources, thorough) · " +
+            "deeper = 10 rounds (~100-200+ sources, very thorough) · " +
+            "exhaustive = 15 rounds (200+ sources, maximum depth)",
         ),
       contentLimitOverride: z
         .number()
@@ -139,7 +136,7 @@ When Local Document Sources is enabled in settings, your indexed local collectio
         .optional()
         .describe(
           "Override chars-per-page for this call only. " +
-          "Higher = richer context per source but slower overall.",
+            "Higher = richer context per source but slower overall.",
         ),
     },
 
@@ -275,7 +272,7 @@ When Local Document Sources is enabled in settings, your indexed local collectio
         .optional()
         .describe(
           "Maximum characters to extract from the page " +
-          "(default: plugin content-per-page setting).",
+            "(default: plugin content-per-page setting).",
         ),
     },
 
@@ -415,7 +412,7 @@ When Local Document Sources is enabled in settings, your indexed local collectio
         .optional()
         .describe(
           "Maximum characters to extract per page " +
-          "(default: plugin content-per-page setting).",
+            "(default: plugin content-per-page setting).",
         ),
     },
 
@@ -548,21 +545,27 @@ When Local Document Sources is enabled in settings, your indexed local collectio
         .max(100)
         .describe(
           "A descriptive name for this collection, e.g. 'Legal Documents', " +
-          "'Research Papers', 'Internal Reports'. Used in search results and reports.",
+            "'Research Papers', 'Internal Reports'. Used in search results and reports.",
         ),
       folderPath: z
         .string()
         .min(1)
         .describe(
           "Absolute path to the folder containing your documents. " +
-          "All supported files in subdirectories will be included.",
+            "All supported files in subdirectories will be included.",
         ),
     },
 
     implementation: async ({ name, folderPath }, { status }) => {
       try {
         const store = getGlobalStore();
-        const collection = store.indexCollection(name, folderPath, status);
+        const cfg = readConfig(ctl);
+        const collection = await store.indexCollection(
+          name,
+          folderPath,
+          cfg.contentLimitPerPage,
+          status,
+        );
         return {
           success: true,
           collection: {
@@ -664,8 +667,10 @@ When Local Document Sources is enabled in settings, your indexed local collectio
     parameters: {
       query: z
         .string()
-        .min(2)
-        .describe("Search query — natural language works best."),
+        .min(1)
+        .describe(
+          "Search query — natural language works best. Use '*' to return all chunks from a collection.",
+        ),
       maxResults: z
         .number()
         .int()
@@ -677,15 +682,10 @@ When Local Document Sources is enabled in settings, your indexed local collectio
         .string()
         .uuid()
         .optional()
-        .describe(
-          "Optional: limit search to a specific collection by its ID.",
-        ),
+        .describe("Optional: limit search to a specific collection by its ID."),
     },
 
-    implementation: async (
-      { query, maxResults, collectionId },
-      { status },
-    ) => {
+    implementation: async ({ query, maxResults, collectionId }, { status }) => {
       const store = getGlobalStore();
 
       if (!store.hasCollections()) {
@@ -695,8 +695,16 @@ When Local Document Sources is enabled in settings, your indexed local collectio
       const max = maxResults ?? 8;
       const targetIds = collectionId ? [collectionId] : undefined;
 
-      status(`Searching local documents: "${query}"`);
-      const hits = store.search(query, max, targetIds);
+      const isWildcard = query.trim() === "*";
+
+      status(
+        isWildcard
+          ? "Listing all local document chunks…"
+          : `Searching local documents: "${query}"`,
+      );
+      const hits = isWildcard
+        ? store.listAll(max, targetIds)
+        : store.search(query, max, targetIds);
 
       if (hits.length === 0) {
         return {
