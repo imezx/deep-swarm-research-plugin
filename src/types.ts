@@ -95,6 +95,9 @@ export interface SwarmTask {
   readonly extraEngines: ReadonlyArray<string>;
   readonly linkCrawlDepth: number;
   readonly queryMutationThreshold: number;
+  readonly enableLocalSources: boolean;
+  readonly localCollectionIds?: ReadonlyArray<string>;
+  readonly roleCollectionMap?: ReadonlyMap<string, ReadonlyArray<string>>;
 }
 
 /** Result produced by a single swarm worker. */
@@ -124,6 +127,7 @@ export interface CrawledSource {
   readonly freshnessScore: number;
   readonly tier: SourceTier;
   readonly relevanceScore: number;
+  readonly origin: SourceOrigin;
 }
 
 export interface AgentMessage {
@@ -185,6 +189,7 @@ export interface ReportSource {
   readonly freshnessScore: number;
   readonly tier: SourceTier;
   readonly relevanceScore: number;
+  readonly origin: SourceOrigin;
 }
 
 export interface CompiledReport {
@@ -197,6 +202,8 @@ export interface CompiledReport {
   readonly contradictions: ReadonlyArray<ContradictionEntry>;
 }
 
+export type SourceOrigin = "web" | "local";
+
 export interface ResearchConfig {
   readonly topic: string;
   readonly focusAreas: ReadonlyArray<string>;
@@ -205,6 +212,9 @@ export interface ResearchConfig {
   readonly enableLinkFollowing: boolean;
   readonly enableAIPlanning: boolean;
   readonly safeSearch: "strict" | "moderate" | "off";
+  readonly enableLocalSources: boolean;
+  readonly localCollectionIds?: ReadonlyArray<string>;
+  readonly roleCollectionMap?: ReadonlyMap<string, ReadonlyArray<string>>;
 }
 
 export interface ResearchResult {

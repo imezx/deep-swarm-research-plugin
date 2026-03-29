@@ -142,6 +142,9 @@ function buildTaskBase(
   | "extraEngines"
   | "linkCrawlDepth"
   | "queryMutationThreshold"
+  | "enableLocalSources"
+  | "localCollectionIds"
+  | "roleCollectionMap"
 > {
   return {
     contentLimit: cfg.contentLimitPerPage,
@@ -158,6 +161,9 @@ function buildTaskBase(
     extraEngines: profile.extraEngines,
     linkCrawlDepth: profile.linkCrawlDepth,
     queryMutationThreshold: profile.queryMutationThreshold,
+    enableLocalSources: cfg.enableLocalSources,
+    localCollectionIds: cfg.localCollectionIds,
+    roleCollectionMap: cfg.roleCollectionMap,
   };
 }
 
@@ -254,8 +260,9 @@ export async function runSwarm(
 
   status(
     `\n Launching swarm for: "${cfg.topic}" [${cfg.depthPreset} — ` +
-      `${profile.depthRounds} rounds, ${profile.pageBudgetPerWorker} pages/worker, ` +
-      `${profile.searchLanes} search lanes, fan-out ×${profile.workerFanOut}]`,
+    `${profile.depthRounds} rounds, ${profile.pageBudgetPerWorker} pages/worker, ` +
+    `${profile.searchLanes} search lanes, fan-out ×${profile.workerFanOut}` +
+    `${cfg.enableLocalSources ? ", local sources enabled" : ""}]`,
   );
 
   const plan = await buildQueryPlan(
@@ -387,7 +394,7 @@ export async function runSwarm(
       round <= 2 ? "Follow-up" : round <= 5 ? "Deep-dive" : "Exhaustive";
     status(
       `\n ${roundName} round ${round} — ${gapPlans.length} targeted gap-fill worker(s), ` +
-        `${profile.pageBudgetPerGapWorker} pages each…`,
+      `${profile.pageBudgetPerGapWorker} pages each…`,
     );
 
     const sourcesBefore = allSources.length;

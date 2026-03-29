@@ -36,6 +36,7 @@ import {
   StatusFn,
   WarnFn,
 } from "../types";
+import { harvestLocalSources } from "../local/search";
 import {
   BATCH_INTER_FETCH_DELAY_MS,
   MIN_USEFUL_WORD_COUNT,
@@ -87,10 +88,35 @@ export async function runWorker(
   const roleTag = `[${task.label}]`;
   status(
     `${roleTag} Starting — ${task.queries.length} queries, budget: ${task.pageBudget} pages` +
-      (task.extraEngines.length > 0
-        ? `, engines: DDG+${task.extraEngines.join("+")}`
-        : ""),
+    (task.extraEngines.length > 0
+      ? `, engines: DDG+${task.extraEngines.join("+")}`
+      : ""),
   );
+
+  if (task.enableLocalSources) {
+    const localBudget = Math.max(2, Math.ceil(task.pageBudget * 0.3));
+    const localSources = harvestLocalSources(
+      task.queries,
+      task.role,
+      task.label,
+      localBudget,
+      task.contentLimit,
+      task.localCollectionIds,
+      task.roleCollectionMap,
+    );
+
+    if (localSources.length > 0) {
+      for (const src of localSources) {
+        state.addVisited(src.url);
+        const fp = contentFingerprint(src.text);
+        state.addHash(fp);
+        sources.push(src);
+      }
+      status(
+        `${roleTag} Local sources: ${localSources.length} chunks from document collections`,
+      );
+    }
+  }
 
   const allHits: Array<{
     url: string;
@@ -513,6 +539,7 @@ async function fetchAndExtract(
     freshnessScore,
     tier: tier as SourceTier,
     relevanceScore,
+    origin: "web" as const,
   };
 }
 

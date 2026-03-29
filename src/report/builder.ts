@@ -173,6 +173,11 @@ const TIER_BADGES: Readonly<Record<string, string>> = {
   low: "[low]",
 };
 
+const ORIGIN_BADGES: Readonly<Record<string, string>> = {
+  web: "",
+  local: "[local]",
+};
+
 /** Compiles the final research report from swarm-collected sources. */
 export async function buildReport(
   topic: string,
@@ -205,6 +210,7 @@ export async function buildReport(
     freshnessScore: c.freshnessScore,
     tier: c.tier,
     relevanceScore: c.relevanceScore,
+    origin: c.origin,
   }));
 
   const allTexts = sources.map((s) => s.text);
@@ -366,6 +372,13 @@ function buildHeader(
   hasSynthesis: boolean,
 ): string {
   const workerLabels = [...new Set(sources.map((s) => s.workerLabel))];
+  const localCount = sources.filter((s) => s.origin === "local").length;
+  const webCount = sources.length - localCount;
+
+  const sourceLine =
+    localCount > 0
+      ? `> **Total sources:** ${sources.length} (${webCount} web, ${localCount} local)`
+      : `> **Total sources:** ${sources.length}`;
 
   return [
     `# Deep Research Report: ${esc(topic)}`,
@@ -374,7 +387,7 @@ function buildHeader(
     `> **Architecture:** Swarm (${workerLabels.length} parallel workers)`,
     `> **Workers:** ${workerLabels.join(", ")}`,
     `> **Research rounds:** ${rounds}`,
-    `> **Total sources:** ${sources.length}`,
+    sourceLine,
     `> **AI query planning:** ${usedAI ? " Enabled" : " Fallback (dimension-based)"}`,
     `> **AI narrative synthesis:** ${hasSynthesis ? " Enabled" : " Structured extraction"}`,
     `> **Dimension coverage:** ${covered}/${DIMENSIONS.length}`,
@@ -495,6 +508,7 @@ function buildFindings(
 function buildFullSources(sources: ReadonlyArray<ReportSource>): string {
   const entries = sources.map((s) => {
     const badge = TIER_BADGES[s.tier] ?? "";
+    const originBadge = ORIGIN_BADGES[s.origin] ?? "";
     const preview = s.text
       .slice(0, REPORT_SOURCE_PREVIEW_CHARS)
       .replace(/\n+/g, " ")
@@ -502,7 +516,7 @@ function buildFullSources(sources: ReadonlyArray<ReportSource>): string {
     const isTruncated = s.text.length > REPORT_SOURCE_PREVIEW_CHARS;
 
     const meta = [
-      `${badge} **${s.tier}** · Score: ${s.domainScore}/100`,
+      `${badge}${originBadge ? " " + originBadge : ""} **${s.tier}** · Score: ${s.domainScore}/100`,
       `Relevance: ${(s.relevanceScore * 100).toFixed(0)}%`,
       s.published ? ` ${s.published}` : null,
       `~${s.wordCount.toLocaleString()} words`,
@@ -533,10 +547,10 @@ function buildFullSources(sources: ReadonlyArray<ReportSource>): string {
 }
 
 function buildCitationIndex(sources: ReadonlyArray<ReportSource>): string {
-  const lines = sources.map(
-    (s) =>
-      `**\\[${s.index}\\]** [${esc(s.title)}](${s.url})${s.published ? ` *(${s.published})*` : ""} ${TIER_BADGES[s.tier] ?? ""}`,
-  );
+  const lines = sources.map((s) => {
+    const originTag = s.origin === "local" ? " [local]" : "";
+    return `**\\[${s.index}\\]** [${esc(s.title)}](${s.url})${s.published ? ` *(${s.published})*` : ""} ${TIER_BADGES[s.tier] ?? ""}${originTag}`;
+  });
   return [`## Citation Index`, ``, ...lines].join("\n");
 }
 

@@ -4,11 +4,10 @@
  * Uses Mozilla Readability as the primary extractor,
  * with a tag-stripping fallback for pages it cannot parse.
  *
- * IMPROVEMENTS:
- * - Aggressive boilerplate removal BEFORE Readability runs (nav, footer,
- *   sidebar, cookie banners, ads, social widgets, comments)
- * - Configurable outlink limit (scales with depth profile)
- * - Better whitespace normalization preserving paragraph structure
+ * Aggressive boilerplate removal runs BEFORE Readability (nav, footer,
+ * sidebar, cookie banners, ads, social widgets, comments). Outlink limit
+ * is configurable and scales with the depth profile. Whitespace
+ * normalization preserves paragraph structure.
  */
 
 import { JSDOM, VirtualConsole } from "jsdom";
@@ -28,7 +27,7 @@ import {
 } from "../constants";
 
 const virtualConsole = new VirtualConsole();
-virtualConsole.on("error", () => {});
+virtualConsole.on("error", () => { });
 
 /** CSS/style tags to strip before DOM parsing */
 const STRIP_BEFORE_PARSE_RE =
@@ -120,7 +119,7 @@ function stripBoilerplate(doc: Document): void {
       for (const el of Array.from(elements)) {
         el.remove();
       }
-    } catch {}
+    } catch { }
   }
 
   try {
@@ -133,7 +132,7 @@ function stripBoilerplate(doc: Document): void {
         el.remove();
       }
     }
-  } catch {}
+  } catch { }
 }
 
 const DEFAULT_MAX_OUTLINKS = 40;

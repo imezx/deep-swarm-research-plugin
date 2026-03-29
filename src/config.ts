@@ -93,4 +93,19 @@ export const configSchematics = createConfigSchematics()
     },
     "moderate",
   )
+  .field(
+    "enableLocalSources",
+    "select",
+    {
+      displayName: "Local Document Sources",
+      subtitle:
+        "Search your indexed local document collections alongside the web. " +
+        "Use the Local Docs tools to add collections first.",
+      options: [
+        { value: "on", displayName: "On — include local documents in research" },
+        { value: "off", displayName: "Off — web only" },
+      ],
+    },
+    "off",
+  )
   .build();

@@ -31,6 +31,12 @@ import {
   SEARCH_RESULTS_MAX,
 } from "./constants";
 
+import {
+  getGlobalStore,
+  LocalCollection,
+} from "./local/store";
+import { isLocalUrl } from "./local/search";
+
 function readConfig(ctl: ToolsProviderController) {
   const c = ctl.getPluginConfig(configSchematics);
   const depth = c.get("researchDepth") as string;
@@ -53,6 +59,7 @@ function readConfig(ctl: ToolsProviderController) {
     enableAIPlanning: (c.get("enableAIPlanning") as string) !== "off",
     safeSearch:
       (c.get("safeSearch") as "strict" | "moderate" | "off") || "moderate",
+    enableLocalSources: (c.get("enableLocalSources") as string) !== "off",
   } as const;
 }
 
@@ -82,6 +89,8 @@ HOW IT WORKS:
 
   7. CONTRADICTION DETECTION: The model identifies claims where sources disagree, with severity ratings.
 
+  8. LOCAL DOCUMENT INTEGRATION: When enabled, each worker searches your indexed local document collections BEFORE hitting the web. Local sources are blended with web results in the final report, giving you a progressive source approach — proprietary knowledge first, public web to fill gaps.
+
 WHAT YOU GET:
   A structured Markdown report including:
   - AI-written narrative analysis (primary section)
@@ -93,14 +102,15 @@ WHAT YOU GET:
   - Full source details with domain authority, relevance score, and publication date
   - Numbered citation index
 
-USE THIS TOOL for thorough, cited research. Not for simple lookups.`,
+USE THIS TOOL for thorough, cited research. Not for simple lookups.
+When Local Document Sources is enabled in settings, your indexed local collections are searched alongside the web — each worker draws from your proprietary data first, then fills gaps from public sources.`,
     parameters: {
       topic: z
         .string()
         .min(3)
         .describe(
           "The research topic or question. Be specific. " +
-            "Example: 'long-term safety profile of GLP-1 receptor agonists' rather than just 'weight loss drugs'.",
+          "Example: 'long-term safety profile of GLP-1 receptor agonists' rather than just 'weight loss drugs'.",
         ),
       focusAreas: z
         .array(z.string())
@@ -108,18 +118,18 @@ USE THIS TOOL for thorough, cited research. Not for simple lookups.`,
         .optional()
         .describe(
           "Optional sub-topics or angles to emphasise across all worker queries. " +
-            "Example: ['side effects', 'clinical trial data', 'FDA approval status']",
+          "Example: ['side effects', 'clinical trial data', 'FDA approval status']",
         ),
       depthOverride: z
         .enum(["shallow", "standard", "deep", "deeper", "exhaustive"])
         .optional()
         .describe(
           "Override depth for this call only. " +
-            "shallow = 1 round (~10-25 sources, fast) · " +
-            "standard = 3 rounds (~30-60 sources) · " +
-            "deep = 5 rounds (~60-120 sources, thorough) · " +
-            "deeper = 10 rounds (~100-200+ sources, very thorough) · " +
-            "exhaustive = 15 rounds (200+ sources, maximum depth)",
+          "shallow = 1 round (~10-25 sources, fast) · " +
+          "standard = 3 rounds (~30-60 sources) · " +
+          "deep = 5 rounds (~60-120 sources, thorough) · " +
+          "deeper = 10 rounds (~100-200+ sources, very thorough) · " +
+          "exhaustive = 15 rounds (200+ sources, maximum depth)",
         ),
       contentLimitOverride: z
         .number()
@@ -129,7 +139,7 @@ USE THIS TOOL for thorough, cited research. Not for simple lookups.`,
         .optional()
         .describe(
           "Override chars-per-page for this call only. " +
-            "Higher = richer context per source but slower overall.",
+          "Higher = richer context per source but slower overall.",
         ),
     },
 
@@ -147,6 +157,7 @@ USE THIS TOOL for thorough, cited research. Not for simple lookups.`,
         enableLinkFollowing: cfg.enableLinkFollowing,
         enableAIPlanning: cfg.enableAIPlanning,
         safeSearch: cfg.safeSearch,
+        enableLocalSources: cfg.enableLocalSources,
       };
 
       try {
@@ -172,6 +183,7 @@ USE THIS TOOL for thorough, cited research. Not for simple lookups.`,
             workerRole: s.workerRole,
             workerLabel: s.workerLabel,
             relevance: Math.round(s.relevanceScore * 100),
+            origin: s.origin,
             excerpt: s.description.slice(0, 200),
           })),
         };
@@ -263,7 +275,7 @@ USE THIS TOOL for thorough, cited research. Not for simple lookups.`,
         .optional()
         .describe(
           "Maximum characters to extract from the page " +
-            "(default: plugin content-per-page setting).",
+          "(default: plugin content-per-page setting).",
         ),
     },
 
@@ -403,7 +415,7 @@ USE THIS TOOL for thorough, cited research. Not for simple lookups.`,
         .optional()
         .describe(
           "Maximum characters to extract per page " +
-            "(default: plugin content-per-page setting).",
+          "(default: plugin content-per-page setting).",
         ),
     },
 
@@ -519,11 +531,202 @@ USE THIS TOOL for thorough, cited research. Not for simple lookups.`,
     },
   });
 
+  const localDocsAddTool = tool({
+    name: "Local Docs Add Collection",
+    description:
+      "Index a local folder of documents into a searchable collection. " +
+      "Once indexed, the Deep Research tool can search these documents alongside the web " +
+      "when Local Document Sources is enabled in settings. " +
+      "Supports text files, markdown, HTML, code files, CSV, JSON, XML, and more. " +
+      "Recursively scans subdirectories up to 10 levels deep. " +
+      "Each collection is identified by a name you choose. " +
+      "Re-indexing a folder that was already indexed replaces the old collection.",
+    parameters: {
+      name: z
+        .string()
+        .min(1)
+        .max(100)
+        .describe(
+          "A descriptive name for this collection, e.g. 'Legal Documents', " +
+          "'Research Papers', 'Internal Reports'. Used in search results and reports.",
+        ),
+      folderPath: z
+        .string()
+        .min(1)
+        .describe(
+          "Absolute path to the folder containing your documents. " +
+          "All supported files in subdirectories will be included.",
+        ),
+    },
+
+    implementation: async ({ name, folderPath }, { status }) => {
+      try {
+        const store = getGlobalStore();
+        const collection = store.indexCollection(name, folderPath, status);
+        return {
+          success: true,
+          collection: {
+            id: collection.id,
+            name: collection.name,
+            folderPath: collection.folderPath,
+            fileCount: collection.fileCount,
+            chunkCount: collection.chunkCount,
+            totalWords: collection.totalWords,
+            indexedAt: collection.indexedAt,
+          },
+          instructions:
+            "Collection indexed. Enable 'Local Document Sources' in plugin settings " +
+            "to include these documents in Deep Research results.",
+        };
+      } catch (err: unknown) {
+        return `Error indexing collection: ${errorMessage(err)}`;
+      }
+    },
+  });
+
+  const localDocsListTool = tool({
+    name: "Local Docs List Collections",
+    description:
+      "List all indexed local document collections with their stats. " +
+      "Shows collection name, folder path, file count, chunk count, and index date.",
+    parameters: {},
+
+    implementation: async () => {
+      const store = getGlobalStore();
+      const collections = store.getCollections();
+
+      if (collections.length === 0) {
+        return {
+          collections: [],
+          message:
+            "No collections indexed yet. Use 'Local Docs Add Collection' to index a folder.",
+        };
+      }
+
+      return {
+        collections: collections.map((c) => ({
+          id: c.id,
+          name: c.name,
+          folderPath: c.folderPath,
+          fileCount: c.fileCount,
+          chunkCount: c.chunkCount,
+          totalWords: c.totalWords,
+          indexedAt: c.indexedAt,
+        })),
+        stats: store.getStats(),
+      };
+    },
+  });
+
+  const localDocsRemoveTool = tool({
+    name: "Local Docs Remove Collection",
+    description:
+      "Remove an indexed local document collection by its ID. " +
+      "Use 'Local Docs List Collections' first to find the collection ID.",
+    parameters: {
+      collectionId: z
+        .string()
+        .uuid()
+        .describe("The UUID of the collection to remove."),
+    },
+
+    implementation: async ({ collectionId }, { status }) => {
+      const store = getGlobalStore();
+      const collection = store.getCollection(collectionId);
+
+      if (!collection) {
+        return `Collection not found: ${collectionId}`;
+      }
+
+      const name = collection.name;
+      const removed = store.removeCollection(collectionId);
+
+      if (removed) {
+        status(`Removed collection "${name}"`);
+        return {
+          success: true,
+          removedCollection: name,
+          remainingCollections: store.getCollections().length,
+        };
+      }
+
+      return "Failed to remove collection.";
+    },
+  });
+
+  const localDocsSearchTool = tool({
+    name: "Local Docs Search",
+    description:
+      "Search across your indexed local document collections. " +
+      "Returns the most relevant chunks from your documents ranked by keyword relevance. " +
+      "Use this for quick lookups in your local data. For full research that combines " +
+      "local and web sources, use 'Deep Research' with Local Document Sources enabled.",
+    parameters: {
+      query: z
+        .string()
+        .min(2)
+        .describe("Search query — natural language works best."),
+      maxResults: z
+        .number()
+        .int()
+        .min(1)
+        .max(20)
+        .optional()
+        .describe("Maximum results to return (default: 8)."),
+      collectionId: z
+        .string()
+        .uuid()
+        .optional()
+        .describe(
+          "Optional: limit search to a specific collection by its ID.",
+        ),
+    },
+
+    implementation: async (
+      { query, maxResults, collectionId },
+      { status },
+    ) => {
+      const store = getGlobalStore();
+
+      if (!store.hasCollections()) {
+        return "No collections indexed. Use 'Local Docs Add Collection' first.";
+      }
+
+      const max = maxResults ?? 8;
+      const targetIds = collectionId ? [collectionId] : undefined;
+
+      status(`Searching local documents: "${query}"`);
+      const hits = store.search(query, max, targetIds);
+
+      if (hits.length === 0) {
+        return {
+          results: [],
+          message: "No relevant documents found for this query.",
+        };
+      }
+
+      status(`Found ${hits.length} relevant chunks.`);
+
+      return hits.map((h, i) => ({
+        rank: i + 1,
+        collection: h.collectionName,
+        file: h.fileName,
+        score: Math.round(h.score * 1000) / 1000,
+        wordCount: h.wordCount,
+        content: h.text,
+      }));
+    },
+  });
+
   return [
     deepResearchTool,
     researchSearchTool,
     researchReadPageTool,
     researchMultiReadTool,
+    localDocsAddTool,
+    localDocsListTool,
+    localDocsRemoveTool,
+    localDocsSearchTool,
   ];
 }
 

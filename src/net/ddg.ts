@@ -165,7 +165,7 @@ export async function searchDDG(
       globalThrottle.reportSuccess();
       return hits;
     }
-  } catch {}
+  } catch { }
 
   if (page <= 1) {
     try {
@@ -179,7 +179,7 @@ export async function searchDDG(
         globalThrottle.reportSuccess();
         return hits;
       }
-    } catch {}
+    } catch { }
   }
 
   const penalty = globalThrottle.reportError();

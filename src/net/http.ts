@@ -194,9 +194,9 @@ async function fetchDirect(
       typeof (AbortSignal as { any?: (sigs: AbortSignal[]) => AbortSignal })
         .any === "function"
         ? (AbortSignal as { any: (sigs: AbortSignal[]) => AbortSignal }).any([
-            signal,
-            timer.signal,
-          ])
+          signal,
+          timer.signal,
+        ])
         : timer.signal;
 
     try {
@@ -309,9 +309,9 @@ async function fetchFromCache(
         typeof (AbortSignal as { any?: (sigs: AbortSignal[]) => AbortSignal })
           .any === "function"
           ? (AbortSignal as { any: (sigs: AbortSignal[]) => AbortSignal }).any([
-              signal,
-              timer.signal,
-            ])
+            signal,
+            timer.signal,
+          ])
           : timer.signal;
 
       const res = await fetch(cacheUrl, {

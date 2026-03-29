@@ -154,8 +154,8 @@ async function aiDecompose(
       const role = VALID_ROLES.includes(item.role) ? item.role : "breadth";
       const queries = Array.isArray(item.queries)
         ? item.queries
-            .filter((q: unknown) => typeof q === "string" && q.length > 3)
-            .slice(0, profile.maxQueriesPerWorker)
+          .filter((q: unknown) => typeof q === "string" && q.length > 3)
+          .slice(0, profile.maxQueriesPerWorker)
         : [];
       if (queries.length < 2) continue;
 

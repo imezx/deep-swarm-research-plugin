@@ -16,7 +16,6 @@ import { ScoredCandidate, SearchHit, SourceTier, Outlink } from "../types";
 
 type DomainEntry = readonly [score: number, tier: SourceTier];
 
-// TODO: add more
 const DOMAIN_DB: Readonly<Record<string, DomainEntry>> = {
   "arxiv.org": [95, "academic"],
   "pubmed.ncbi.nlm.nih.gov": [98, "academic"],
@@ -158,8 +157,8 @@ export function scoreCandidate(hit: SearchHit, query: string): ScoredCandidate {
 
   const totalScore = Math.round(
     domainScore * SCORE_WEIGHT_DOMAIN +
-      urlQuality * SCORE_WEIGHT_URL_QUALITY +
-      freshnessScore * SCORE_WEIGHT_FRESHNESS,
+    urlQuality * SCORE_WEIGHT_URL_QUALITY +
+    freshnessScore * SCORE_WEIGHT_FRESHNESS,
   );
 
   return {
