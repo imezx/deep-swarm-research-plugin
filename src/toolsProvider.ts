@@ -211,7 +211,8 @@ When Local Document Sources is enabled in settings, your indexed RAG libraries a
       "Search DuckDuckGo and return scored, ranked results with domain authority tiers. " +
       "Each result includes a domain score (0-100), source tier (academic/government/news/etc.), " +
       "URL quality score, and freshness estimate. Results are ranked by combined quality. " +
-      "Use this for focused lookups. For full research, use 'Deep Research'.",
+      "Use this for focused lookups. For full research, use 'Deep Research'." +
+      "Don't use this for searching local files.",
     parameters: {
       query: z
         .string()
@@ -264,7 +265,7 @@ When Local Document Sources is enabled in settings, your indexed RAG libraries a
   const researchReadPageTool = tool({
     name: "Research Read Page",
     description:
-      "Visit a URL and return cleanly extracted text using Mozilla Readability " +
+      "Visit a website URL and return cleanly extracted text using Mozilla Readability " +
       "(the same engine as Firefox Reader Mode). " +
       "Automatically detects PDF URLs (arXiv, Springer, IEEE, etc.) and extracts " +
       "text content and embedded images from the PDF instead of returning garbled bytes. " +
@@ -272,7 +273,9 @@ When Local Document Sources is enabled in settings, your indexed RAG libraries a
       "domain authority score, source tier, and top outbound links. " +
       "For PDFs, embedded images are saved to temp files and returned as file paths " +
       "with dimensions and size metadata (not inline base64). " +
-      "Use this to read individual pages. For reading multiple URLs at once use 'Research Multi-Read'.",
+      "Use this to read individual pages. For reading multiple URLs at once use 'Research Multi-Read'." +
+      "with dimensions and size metadata (not inline base64). " +
+      "Don't use this for reading local files.",
     parameters: {
       url: z.string().url().describe("The URL to visit and read."),
       contentLimit: z
