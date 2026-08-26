@@ -1,172 +1,89 @@
 /**
  * @file local/store.ts
- * Local document store with multi-collection support.
- *
- * Indexes user documents into searchable chunks using TF-IDF weighted
- * keyword matching. Designed to run entirely on-device with zero
- * external dependencies — no vector database, no embedding model needed.
- *
- * Collections map naturally to the swarm's worker roles: a user might
- * have a "legal" collection queried by the regulatory worker, a "papers"
- * collection for the academic worker, and a "reports" collection for
- * the breadth worker.
+ * Disk-backed local document collections with BM25 search. Snapshots are
+ * written atomically and reloaded on startup.
  */
-
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as crypto from "node:crypto";
+import { Bm25Index } from "./bm25";
+import { tokenize } from "../core/util";
 
-export interface DocumentChunk {
-  readonly id: string;
-  readonly collectionId: string;
-  readonly filePath: string;
-  readonly fileName: string;
-  readonly chunkIndex: number;
-  readonly text: string;
-  readonly wordCount: number;
-  readonly terms: ReadonlyMap<string, number>;
-}
-
-export interface LocalCollection {
-  readonly id: string;
-  readonly name: string;
-  readonly folderPath: string;
-  readonly fileCount: number;
-  readonly chunkCount: number;
-  readonly totalWords: number;
-  readonly indexedAt: string;
-}
-
-export interface LocalSearchHit {
-  readonly chunkId: string;
-  readonly collectionId: string;
-  readonly collectionName: string;
-  readonly filePath: string;
-  readonly fileName: string;
-  readonly text: string;
-  readonly wordCount: number;
-  readonly score: number;
-  readonly chunkIndex: number;
-}
-
-const CHUNK_SIZE_CHARS = 1500;
+const CHUNK_SIZE_CHARS = 1_500;
 const CHUNK_OVERLAP_CHARS = 200;
 const MIN_CHUNK_WORDS = 20;
 const MAX_CHUNKS_PER_FILE = 200;
+const MAX_FILE_BYTES = 5 * 1024 * 1024;
 
-const SUPPORTED_EXTENSIONS = new Set([
-  ".txt", ".md", ".markdown", ".rst", ".org",
-  ".html", ".htm", ".xhtml",
-  ".csv", ".tsv",
-  ".json", ".jsonl",
-  ".xml",
-  ".log",
-  ".yaml", ".yml",
-  ".ini", ".cfg", ".conf",
-  ".tex", ".bib",
-  ".py", ".js", ".ts", ".java", ".c", ".cpp", ".h", ".hpp",
-  ".rs", ".go", ".rb", ".php", ".swift", ".kt", ".scala",
-  ".sh", ".bash", ".zsh", ".ps1",
-  ".sql",
-  ".r", ".R",
-  ".css", ".scss", ".less",
+const SUPPORTED_EXTENSIONS: ReadonlySet<string> = new Set([
+  ".txt", ".md", ".markdown", ".rst", ".html", ".htm", ".xhtml",
+  ".csv", ".tsv", ".json", ".xml", ".yaml", ".yml", ".toml", ".ini",
+  ".log", ".ts", ".tsx", ".js", ".jsx", ".py", ".java", ".c", ".h",
+  ".cpp", ".hpp", ".cs", ".go", ".rs", ".rb", ".php", ".sh", ".sql",
 ]);
 
-const STOP_WORDS = new Set([
-  "the", "a", "an", "is", "in", "of", "and", "or", "for", "to", "how",
-  "what", "why", "when", "does", "with", "from", "that", "this", "these",
-  "those", "would", "should", "could", "which", "about", "their", "its",
-  "are", "was", "were", "been", "being", "have", "has", "had", "having",
-  "do", "did", "doing", "will", "shall", "may", "might", "can", "must",
-  "not", "no", "nor", "but", "if", "then", "else", "so", "than",
-  "too", "very", "just", "only", "also", "more", "most", "some", "any",
-  "each", "every", "all", "both", "few", "many", "much", "such",
-  "own", "same", "other", "into", "over", "after", "before", "between",
-  "under", "above", "below", "up", "down", "out", "off", "on", "at",
-  "by", "as", "be", "it", "he", "she", "we", "they", "me", "him",
-  "her", "us", "them", "my", "your", "his", "our", "you", "i",
-]);
+/* ---------------- chunking & text prep ---------------- */
 
-function tokenize(text: string): string[] {
-  return text
-    .toLowerCase()
-    .replace(/[^a-z0-9\s\-]/g, " ")
-    .split(/\s+/)
-    .filter((w) => w.length > 2 && !STOP_WORDS.has(w));
-}
-
-function computeTermFrequencies(tokens: string[]): Map<string, number> {
-  const freq = new Map<string, number>();
-  for (const token of tokens) {
-    freq.set(token, (freq.get(token) ?? 0) + 1);
-  }
-  return freq;
-}
-
-function chunkText(text: string): string[] {
+export function chunkText(text: string): string[] {
   const chunks: string[] = [];
   let offset = 0;
 
   while (offset < text.length && chunks.length < MAX_CHUNKS_PER_FILE) {
-    const end = Math.min(offset + CHUNK_SIZE_CHARS, text.length);
-    let slice = text.slice(offset, end);
+    const remaining = text.length - offset;
+    if (remaining <= CHUNK_SIZE_CHARS) {
+      // Final partial slice — take whole, no overlap math needed.
+      const tail = text.slice(offset).trim();
+      if (tail.length > 0) chunks.push(tail);
+      break;
+    }
 
-    if (end < text.length) {
-      const lastBreak = Math.max(
-        slice.lastIndexOf("\n\n"),
-        slice.lastIndexOf(". "),
-        slice.lastIndexOf(".\n"),
-      );
-      if (lastBreak > CHUNK_SIZE_CHARS * 0.3) {
-        slice = slice.slice(0, lastBreak + 1);
-      }
+    let slice = text.slice(offset, offset + CHUNK_SIZE_CHARS);
+    // Prefer paragraph breaks; accept sentence ends; NEVER cut mid-word.
+    const breakAt = Math.max(
+      slice.lastIndexOf("\n\n"),
+      slice.lastIndexOf(". "),
+      slice.lastIndexOf(".\n"),
+    );
+    if (breakAt > CHUNK_SIZE_CHARS * 0.3) {
+      slice = slice.slice(0, breakAt + 1);
     }
 
     const trimmed = slice.trim();
-    if (trimmed.length > 0) {
-      chunks.push(trimmed);
-    }
+    if (trimmed.length > 0) chunks.push(trimmed);
 
-    offset += Math.max(slice.length - CHUNK_OVERLAP_CHARS, 1);
+    // Advance by the trimmed length minus overlap; minimum stride of half a
+    // chunk guarantees progress even on degenerate repetitive text.
+    const advance = Math.max(
+      trimmed.length - CHUNK_OVERLAP_CHARS,
+      Math.floor(CHUNK_SIZE_CHARS / 2),
+      1,
+    );
+    offset += advance;
   }
 
   return chunks;
 }
 
-function stripHtmlTags(html: string): string {
+function stripHtml(html: string): string {
   return html
     .replace(/<script[\s\S]*?<\/script>/gi, "")
     .replace(/<style[\s\S]*?<\/style>/gi, "")
     .replace(/<[^>]+>/g, " ")
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#x27;/g, "'")
-    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"').replace(/&#x27;/g, "'").replace(/&nbsp;/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
 
-function readFileAsText(filePath: string): string | null {
+function readFileText(filePath: string): string | null {
   try {
-    const ext = path.extname(filePath).toLowerCase();
+    const stat = fs.statSync(filePath);
+    if (stat.size > MAX_FILE_BYTES) return null;
     const raw = fs.readFileSync(filePath, "utf-8");
-
-    if (ext === ".html" || ext === ".htm" || ext === ".xhtml") {
-      return stripHtmlTags(raw);
-    }
-
-    if (ext === ".json") {
-      try {
-        const parsed = JSON.parse(raw);
-        return JSON.stringify(parsed, null, 2);
-      } catch {
-        return raw;
-      }
-    }
-
-    return raw;
+    const ext = path.extname(filePath).toLowerCase();
+    return ext === ".html" || ext === ".htm" || ext === ".xhtml"
+      ? stripHtml(raw)
+      : raw;
   } catch {
     return null;
   }
@@ -177,297 +94,289 @@ function scanDirectory(dirPath: string): string[] {
 
   function walk(dir: string, depth: number): void {
     if (depth > 10) return;
-
     let entries: fs.Dirent[];
     try {
       entries = fs.readdirSync(dir, { withFileTypes: true });
     } catch {
       return;
     }
-
     for (const entry of entries) {
-      if (entry.name.startsWith(".")) continue;
-      if (entry.name === "node_modules") continue;
-
+      if (entry.name.startsWith(".") || entry.name === "node_modules") continue;
       const fullPath = path.join(dir, entry.name);
-
-      if (entry.isDirectory()) {
-        walk(fullPath, depth + 1);
-      } else if (entry.isFile()) {
-        const ext = path.extname(entry.name).toLowerCase();
-        if (SUPPORTED_EXTENSIONS.has(ext)) {
-          files.push(fullPath);
-        }
+      if (entry.isDirectory()) walk(fullPath, depth + 1);
+      else if (entry.isFile() && SUPPORTED_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) {
+        files.push(fullPath);
       }
     }
   }
 
   walk(dirPath, 0);
-  return files;
+  return files.sort();
 }
 
-export class LocalDocumentStore {
-  private readonly collections = new Map<string, LocalCollection>();
-  private readonly chunks = new Map<string, DocumentChunk>();
-  private readonly collectionChunks = new Map<string, Set<string>>();
-  private readonly idf = new Map<string, number>();
-  private totalDocuments = 0;
-  private readonly documentFrequency = new Map<string, number>();
+/* ---------------- persistence types ---------------- */
 
-  getCollections(): ReadonlyArray<LocalCollection> {
-    return Array.from(this.collections.values());
+interface StoredChunk {
+  id: string;
+  fileName: string;
+  filePath: string;
+  text: string;
+}
+
+interface Snapshot {
+  version: 2;
+  collectionId: string;
+  name: string;
+  folderPath: string;
+  indexedAt: string;
+  chunks: StoredChunk[];
+}
+
+export interface LocalCollectionInfo {
+  readonly id: string;
+  readonly name: string;
+  readonly folderPath: string;
+  readonly fileCount: number;
+  readonly chunkCount: number;
+  readonly totalWords: number;
+  readonly indexedAt: string;
+}
+
+export interface LocalSearchHit {
+  readonly collectionId: string;
+  readonly collectionName: string;
+  readonly fileName: string;
+  readonly filePath: string;
+  readonly chunkIndex: number;
+  readonly text: string;
+  readonly wordCount: number;
+  readonly score: number;
+}
+
+const STORAGE_DIR = path.join(
+  process.env.USERPROFILE ?? process.env.HOME ?? ".",
+  ".deep-swarm-research",
+  "collections",
+);
+
+class Collection {
+  readonly info: LocalCollectionInfo;
+  private readonly chunkTexts = new Map<string, StoredChunk>();
+  private readonly index = new Bm25Index();
+
+  constructor(info: LocalCollectionInfo) {
+    this.info = info;
   }
 
-  getCollection(id: string): LocalCollection | undefined {
-    return this.collections.get(id);
+  addChunk(chunk: StoredChunk): void {
+    this.chunkTexts.set(chunk.id, chunk);
+    const tokens = tokenize(chunk.text);
+    const terms = new Map<string, number>();
+    for (const t of tokens) terms.set(t, (terms.get(t) ?? 0) + 1);
+    this.index.add({ id: chunk.id, termFrequencies: terms, length: tokens.length });
+  }
+
+  removeChunk(id: string): void {
+    this.chunkTexts.delete(id);
+    this.index.remove(id);
+  }
+
+  get chunkCount(): number {
+    return this.index.size;
+  }
+
+  search(queryTokens: ReadonlyArray<string>, limit: number): Array<{ chunk: StoredChunk; score: number }> {
+    return this.index.search(queryTokens, limit).map(({ id, score }) => ({
+      chunk: this.chunkTexts.get(id)!,
+      score,
+    })).filter((r) => r.chunk !== undefined);
+  }
+}
+
+/* ---------------- store ---------------- */
+
+export class DocumentStore {
+  private readonly collections = new Map<string, Collection>();
+  private loaded = false;
+
+  private ensureLoaded(): void {
+    if (this.loaded) return;
+    this.loaded = true;
+    try {
+      for (const file of fs.existsSync(STORAGE_DIR)
+        ? fs.readdirSync(STORAGE_DIR).filter((f) => f.endsWith(".json"))
+        : []) {
+        this.loadSnapshot(path.join(STORAGE_DIR, file));
+      }
+    } catch {
+      // Corrupt/absent storage — start empty rather than crash the plugin.
+    }
+  }
+
+  private loadSnapshot(file: string): void {
+    const raw = JSON.parse(fs.readFileSync(file, "utf-8")) as Snapshot;
+    if (raw.version !== 2 || !Array.isArray(raw.chunks)) return;
+    const info: LocalCollectionInfo = {
+      id: raw.collectionId,
+      name: raw.name,
+      folderPath: raw.folderPath,
+      fileCount: new Set(raw.chunks.map((c) => c.filePath)).size,
+      chunkCount: raw.chunks.length,
+      totalWords: raw.chunks.reduce(
+        (sum, c) => sum + tokenize(c.text).length, 0),
+      indexedAt: raw.indexedAt,
+    };
+    const col = new Collection(info);
+    for (const chunk of raw.chunks) col.addChunk(chunk);
+    this.collections.set(raw.collectionId, col);
+  }
+
+  getCollections(): ReadonlyArray<LocalCollectionInfo> {
+    this.ensureLoaded();
+    return [...this.collections.values()].map((c) => c.info);
   }
 
   hasCollections(): boolean {
+    this.ensureLoaded();
     return this.collections.size > 0;
   }
 
+  /**
+   * Indexes a folder. Replaces any existing collection pointed at the same
+   * resolved folder. Persists atomically before returning.
+   */
   indexCollection(
     name: string,
     folderPath: string,
     onProgress?: (message: string) => void,
-  ): LocalCollection {
-    const resolvedPath = path.resolve(folderPath);
+  ): LocalCollectionInfo {
+    this.ensureLoaded();
+    const resolved = path.resolve(folderPath);
+    if (!fs.existsSync(resolved)) throw new Error(`Folder not found: ${resolved}`);
+    if (!fs.statSync(resolved).isDirectory()) throw new Error(`Not a directory: ${resolved}`);
 
-    if (!fs.existsSync(resolvedPath)) {
-      throw new Error(`Folder not found: ${resolvedPath}`);
-    }
-
-    const stat = fs.statSync(resolvedPath);
-    if (!stat.isDirectory()) {
-      throw new Error(`Path is not a directory: ${resolvedPath}`);
-    }
-
-    const existingId = Array.from(this.collections.values()).find(
-      (c) => c.folderPath === resolvedPath,
-    )?.id;
-    if (existingId) {
-      this.removeCollection(existingId);
+    for (const existing of this.collections.values()) {
+      if (existing.info.folderPath === resolved) this.removeCollection(existing.info.id);
     }
 
     const collectionId = crypto.randomUUID();
-    const chunkIds = new Set<string>();
-
-    onProgress?.(`Scanning ${resolvedPath} for documents…`);
-    const files = scanDirectory(resolvedPath);
+    onProgress?.(`Scanning ${resolved}…`);
+    const files = scanDirectory(resolved);
     onProgress?.(`Found ${files.length} supported files`);
 
-    let totalWords = 0;
+    const collection = new Collection({
+      id: collectionId,
+      name,
+      folderPath: resolved,
+      fileCount: 0,
+      chunkCount: 0,
+      totalWords: 0,
+      indexedAt: new Date().toISOString(),
+    });
+
+    const pending: StoredChunk[] = [];
     let indexedFiles = 0;
 
     for (const filePath of files) {
-      const text = readFileAsText(filePath);
+      const text = readFileText(filePath);
       if (!text || text.trim().length < 50) continue;
 
-      const textChunks = chunkText(text);
-      const fileName = path.relative(resolvedPath, filePath);
-
-      for (let ci = 0; ci < textChunks.length; ci++) {
-        const chunkText = textChunks[ci];
-        const tokens = tokenize(chunkText);
-        if (tokens.length < MIN_CHUNK_WORDS) continue;
-
-        const chunkId = `${collectionId}:${indexedFiles}:${ci}`;
-        const terms = computeTermFrequencies(tokens);
-
-        const chunk: DocumentChunk = {
-          id: chunkId,
-          collectionId,
+      const relName = path.relative(resolved, filePath);
+      const chunks = chunkText(text);
+      for (let ci = 0; ci < chunks.length; ci++) {
+        if (tokenize(chunks[ci]).length < MIN_CHUNK_WORDS) continue;
+        const chunk: StoredChunk = {
+          id: `${collectionId}:${filePath}:${ci}`,
+          fileName: relName,
           filePath,
-          fileName,
-          chunkIndex: ci,
-          text: chunkText,
-          wordCount: tokens.length,
-          terms,
+          text: chunks[ci],
         };
-
-        this.chunks.set(chunkId, chunk);
-        chunkIds.add(chunkId);
-        totalWords += tokens.length;
-        this.totalDocuments++;
-
-        for (const term of terms.keys()) {
-          this.documentFrequency.set(
-            term,
-            (this.documentFrequency.get(term) ?? 0) + 1,
-          );
-        }
+        pending.push(chunk);
+        collection.addChunk(chunk);
       }
-
-      indexedFiles++;
-      if (indexedFiles % 50 === 0) {
-        onProgress?.(`Indexed ${indexedFiles}/${files.length} files…`);
-      }
+      indexedFiles += 1;
+      if (indexedFiles % 50 === 0) onProgress?.(`Indexed ${indexedFiles}/${files.length} files…`);
     }
 
-    this.rebuildIdf();
-
-    const collection: LocalCollection = {
-      id: collectionId,
-      name,
-      folderPath: resolvedPath,
+    const info: LocalCollectionInfo = {
+      ...collection.info,
       fileCount: indexedFiles,
-      chunkCount: chunkIds.size,
-      totalWords,
-      indexedAt: new Date().toISOString(),
+      chunkCount: collection.chunkCount,
     };
-
     this.collections.set(collectionId, collection);
-    this.collectionChunks.set(collectionId, chunkIds);
 
-    onProgress?.(
-      `Collection "${name}" ready: ${indexedFiles} files, ${chunkIds.size} chunks, ~${totalWords.toLocaleString()} words`,
+    // Atomic snapshot BEFORE returning — crash-safe and immediately reloadable.
+    this.persistSnapshot(
+      { version: 2, collectionId, name, folderPath: resolved, indexedAt: collection.info.indexedAt, chunks: pending },
     );
 
-    return collection;
+    onProgress?.(`Collection "${name}" ready: ${info.fileCount} files, ${info.chunkCount} chunks`);
+    return info;
+  }
+
+  /** Atomic write: temp file in same dir + rename. */
+  private persistSnapshot(snapshot: Snapshot): void {
+    fs.mkdirSync(STORAGE_DIR, { recursive: true });
+    const tempPath = path.join(STORAGE_DIR, `.${snapshot.collectionId}.tmp`);
+    const finalPath = path.join(STORAGE_DIR, `${snapshot.collectionId}.json`);
+    fs.writeFileSync(tempPath, JSON.stringify(snapshot));
+    fs.renameSync(tempPath, finalPath);
   }
 
   removeCollection(id: string): boolean {
-    const chunkIds = this.collectionChunks.get(id);
-    if (!chunkIds) return false;
-
-    for (const chunkId of chunkIds) {
-      const chunk = this.chunks.get(chunkId);
-      if (chunk) {
-        for (const [term, count] of chunk.terms) {
-          const current = this.documentFrequency.get(term) ?? 0;
-          if (current <= count) {
-            this.documentFrequency.delete(term);
-          } else {
-            this.documentFrequency.set(term, current - count);
-          }
-        }
-        this.totalDocuments--;
-      }
-      this.chunks.delete(chunkId);
-    }
-
-    this.collectionChunks.delete(id);
-    this.collections.delete(id);
-    this.rebuildIdf();
-
-    return true;
+    this.ensureLoaded();
+    const existed = this.collections.delete(id);
+    const file = path.join(STORAGE_DIR, `${id}.json`);
+    try {
+      if (fs.existsSync(file)) fs.unlinkSync(file);
+    } catch { /* best-effort disk cleanup */ }
+    return existed;
   }
 
   search(
     query: string,
-    maxResults: number = 10,
+    maxResults: number,
     collectionIds?: ReadonlyArray<string>,
-  ): ReadonlyArray<LocalSearchHit> {
+  ): LocalSearchHit[] {
+    this.ensureLoaded();
     const queryTokens = tokenize(query);
     if (queryTokens.length === 0) return [];
 
-    const queryTerms = computeTermFrequencies(queryTokens);
-    const targetCollections = collectionIds
-      ? new Set(collectionIds)
-      : undefined;
+    const targets = collectionIds
+      ? [...this.collections.entries()].filter(([id]) => collectionIds.includes(id))
+      : [...this.collections.entries()];
+    if (targets.length === 0) return [];
 
-    const scored: Array<{ chunk: DocumentChunk; score: number }> = [];
+    const perCollection = Math.max(maxResults, 4);
+    const pooled: Array<{ hit: LocalSearchHit }> = [];
 
-    for (const chunk of this.chunks.values()) {
-      if (targetCollections && !targetCollections.has(chunk.collectionId)) {
-        continue;
+    for (const [id, col] of targets) {
+      for (const { chunk, score } of col.search(queryTokens, perCollection)) {
+        pooled.push({
+          hit: {
+            collectionId: id,
+            collectionName: col.info.name,
+            fileName: chunk.fileName,
+            filePath: chunk.filePath,
+            chunkIndex: Number(chunk.id.split(":").pop() ?? 0),
+            text: chunk.text,
+            wordCount: tokenize(chunk.text).length,
+            score,
+          },
+        });
       }
-
-      let score = 0;
-      let matchedTerms = 0;
-
-      for (const [term, queryFreq] of queryTerms) {
-        const docFreq = chunk.terms.get(term);
-        if (!docFreq) continue;
-
-        matchedTerms++;
-
-        const tf = docFreq / chunk.wordCount;
-        const idf = this.idf.get(term) ?? 1;
-        score += tf * idf * queryFreq;
-      }
-
-      if (matchedTerms === 0) continue;
-
-      const coverage = matchedTerms / queryTerms.size;
-      score *= 1 + coverage * 0.5;
-
-      scored.push({ chunk, score });
     }
 
-    scored.sort((a, b) => b.score - a.score);
-
-    const seen = new Set<string>();
-    const results: LocalSearchHit[] = [];
-
-    for (const { chunk, score } of scored) {
-      if (results.length >= maxResults) break;
-
-      const dedupeKey = `${chunk.filePath}:${chunk.chunkIndex}`;
-      if (seen.has(dedupeKey)) continue;
-      seen.add(dedupeKey);
-
-      const collection = this.collections.get(chunk.collectionId);
-
-      results.push({
-        chunkId: chunk.id,
-        collectionId: chunk.collectionId,
-        collectionName: collection?.name ?? "unknown",
-        filePath: chunk.filePath,
-        fileName: chunk.fileName,
-        text: chunk.text,
-        wordCount: chunk.wordCount,
-        score,
-        chunkIndex: chunk.chunkIndex,
-      });
-    }
-
-    return results;
-  }
-
-  searchByRole(
-    query: string,
-    role: string,
-    maxResults: number = 8,
-    roleCollectionMap?: ReadonlyMap<string, ReadonlyArray<string>>,
-  ): ReadonlyArray<LocalSearchHit> {
-    const targetIds = roleCollectionMap?.get(role);
-    return this.search(query, maxResults, targetIds);
-  }
-
-  getStats(): {
-    collections: number;
-    totalChunks: number;
-    totalWords: number;
-    uniqueTerms: number;
-  } {
-    let totalWords = 0;
-    for (const col of this.collections.values()) {
-      totalWords += col.totalWords;
-    }
-    return {
-      collections: this.collections.size,
-      totalChunks: this.chunks.size,
-      totalWords,
-      uniqueTerms: this.idf.size,
-    };
-  }
-
-  private rebuildIdf(): void {
-    this.idf.clear();
-    const n = Math.max(1, this.totalDocuments);
-
-    for (const [term, docCount] of this.documentFrequency) {
-      this.idf.set(term, Math.log(1 + n / (1 + docCount)));
-    }
+    return pooled
+      .sort((a, b) => b.hit.score - a.hit.score)
+      .slice(0, maxResults)
+      .map((p) => p.hit);
   }
 }
 
-let globalStore: LocalDocumentStore | null = null;
+let globalStore: DocumentStore | null = null;
 
-export function getGlobalStore(): LocalDocumentStore {
-  if (!globalStore) {
-    globalStore = new LocalDocumentStore();
-  }
+export function getDocumentStore(): DocumentStore {
+  globalStore ??= new DocumentStore();
   return globalStore;
 }

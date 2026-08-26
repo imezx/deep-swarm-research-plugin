@@ -1,330 +1,86 @@
 /**
  * @file report/builder.ts
- * Compiles a structured Markdown research report from swarm results.
- * AI synthesis is the primary narrative section; structured extraction
- * is retained as a fallback when AI is unavailable.
+ * Compiles the final Markdown report: synthesis, contradictions, coverage,
+ * sources, citation index, and run diagnostics.
  */
-
-import { CrawledSource } from "../types";
-import {
-  CompiledReport,
-  ReportSource,
-  ContradictionEntry,
-} from "../types";
-import { DIMENSIONS, detectCoveredDimensions } from "../planning/dimensions";
+import type {
+  CompiledReport, ContradictionEntry, CrawledSource, DepthProfile, StatusFn,
+} from "../core/types";
+import { RunLedger, renderDiagnostics } from "../core/ledger";
+import { detectCoveredDimensions, detectGapDimensions, DIMENSIONS } from "../core/dimensions";
+import { extractKeywords, truncate } from "../core/util";
 import { synthesiseReport, detectContradictions } from "../synthesis/ai";
-import { StatusFn } from "../types";
-import { DepthProfile } from "../constants";
-import {
-  MAX_SENTENCE_CHARS,
-  IDEAL_SENTENCE_LENGTH,
-  CONSENSUS_OVERLAP_FRACTION,
-  MAX_CONSENSUS_PHRASES,
-  KEY_SENTENCES_PER_SOURCE,
-  MAX_SOURCES_PER_DIMENSION,
-  REPORT_SOURCE_PREVIEW_CHARS,
-} from "../constants";
 
-const INFO_MARKERS: ReadonlyArray<string> = [
-  "is a",
-  "is the",
-  "refers to",
-  "known as",
-  "defined as",
-  "found that",
-  "shows that",
-  "research",
-  "study",
-  "according to",
-  "estimated",
-  "reported",
-  "discovered",
-  "demonstrated",
-  "evidence",
-  "however",
-  "although",
-  "despite",
-  "unlike",
-  "compared to",
-  "increased",
-  "decreased",
-  "improved",
-  "reduced",
-  "percent",
-  "%",
-  "million",
-  "billion",
-  "2024",
-  "2025",
-  "2026",
-];
-
-function extractKeySentences(
-  text: string,
-  keywords: ReadonlyArray<string>,
-  count: number,
-): ReadonlyArray<string> {
-  const sentences = text
-    .replace(/\n+/g, " ")
-    .split(/(?<=[.!?])\s+/)
-    .map((s) => s.trim())
-    .filter((s) => s.length > 40 && s.length < MAX_SENTENCE_CHARS);
-
-  const lowerKw = keywords.map((k) => k.toLowerCase());
-
-  const scored = sentences.map((s) => {
-    const lower = s.toLowerCase();
-    let score = 0;
-    score += INFO_MARKERS.filter((m) => lower.includes(m)).length * 2;
-    score += lowerKw.filter((kw) => lower.includes(kw)).length * 3;
-    score -= Math.abs(s.length - IDEAL_SENTENCE_LENGTH) / 50;
-    return { s, score };
-  });
-
-  return scored
-    .sort((a, b) => b.score - a.score)
-    .slice(0, count)
-    .sort((a, b) => text.indexOf(a.s) - text.indexOf(b.s))
-    .map((x) => x.s);
+function labelOf(id: string): string {
+  return DIMENSIONS.find((d) => d.id === id)?.label ?? id;
 }
 
-function detectConsensus(
-  sources: ReadonlyArray<ReportSource>,
-  keywords: ReadonlyArray<string>,
-): ReadonlyArray<string> {
-  if (sources.length < 2) return [];
 
-  const lowerKw = keywords.map((k) => k.toLowerCase());
-  const ngramCounts = new Map<string, number>();
-  const threshold = Math.max(
-    2,
-    Math.ceil(sources.length * CONSENSUS_OVERLAP_FRACTION),
-  );
-
-  for (const src of sources) {
-    const words = src.text
-      .toLowerCase()
-      .replace(/[^a-z0-9\s]/g, " ")
-      .split(/\s+/)
-      .filter((w) => w.length > 3)
-      .slice(0, 500);
-
-    const local = new Set<string>();
-    for (let i = 0; i < words.length - 2; i++) {
-      local.add(`${words[i]} ${words[i + 1]}`);
-      local.add(`${words[i]} ${words[i + 1]} ${words[i + 2]}`);
-    }
-    for (const ng of local) ngramCounts.set(ng, (ngramCounts.get(ng) ?? 0) + 1);
-  }
-
-  return Array.from(ngramCounts.entries())
-    .filter(
-      ([ng, count]) =>
-        count >= threshold && lowerKw.some((kw) => ng.includes(kw)),
-    )
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, MAX_CONSENSUS_PHRASES)
-    .map(([ng, count]) => `"${ng}" (${count} of ${sources.length} sources)`);
-}
-
-interface DimGroup {
-  label: string;
-  entries: ReadonlyArray<{
-    index: number;
-    title: string;
-    sentences: ReadonlyArray<string>;
-  }>;
-}
-
-function groupByDimension(
-  sources: ReadonlyArray<ReportSource>,
-  keywords: ReadonlyArray<string>,
-): ReadonlyArray<DimGroup> {
-  return DIMENSIONS.map((dim) => {
-    const matching = sources
-      .filter((s) =>
-        dim.keywords.some((kw) => s.text.toLowerCase().includes(kw)),
-      )
-      .slice(0, MAX_SOURCES_PER_DIMENSION);
-
-    const entries = matching
-      .map((s) => ({
-        index: s.index,
-        title: s.title,
-        sentences: extractKeySentences(
-          s.text,
-          [...keywords, ...dim.keywords],
-          KEY_SENTENCES_PER_SOURCE,
-        ),
-      }))
-      .filter((e) => e.sentences.length > 0);
-
-    return { label: dim.label, entries };
-  }).filter((g) => g.entries.length > 0);
-}
-
-const TIER_BADGES: Readonly<Record<string, string>> = {
-  academic: "[academic]",
-  government: "[gov]",
-  reference: "[ref]",
-  news: "[news]",
-  professional: "[pro]",
-  general: "[general]",
-  low: "[low]",
-};
-
-const ORIGIN_BADGES: Readonly<Record<string, string>> = {
-  web: "",
-  local: "[local]",
-};
-
-/** Compiles the final research report from swarm-collected sources. */
 export async function buildReport(
   topic: string,
-  crawled: ReadonlyArray<CrawledSource>,
+  sources: ReadonlyArray<CrawledSource>,
   queriesUsed: ReadonlyArray<string>,
-  topicKws: ReadonlyArray<string>,
-  totalRounds: number,
+  ledger: RunLedger,
   usedAI: boolean,
   enableAI: boolean,
+  profile: DepthProfile,
   status: StatusFn,
-  profile?: DepthProfile,
+  learnings: ReadonlyArray<string> = [],
+  abortSignal?: AbortSignal,
+  partialNotice?: string,
 ): Promise<CompiledReport> {
-  const now = new Date().toUTCString();
-
-  const keywords: ReadonlyArray<string> =
-    topicKws.length > 0 ? topicKws : extractKeywordsFromTopic(topic);
-
-  const sources: ReportSource[] = crawled.map((c, i) => ({
-    index: i + 1,
-    url: c.finalUrl || c.url,
-    title: c.title || "Untitled",
-    description: c.description,
-    published: c.published,
-    text: c.text,
-    wordCount: c.wordCount,
-    sourceQuery: c.sourceQuery,
-    workerRole: c.workerRole,
-    workerLabel: c.workerLabel,
-    domainScore: c.domainScore,
-    freshnessScore: c.freshnessScore,
-    tier: c.tier,
-    relevanceScore: c.relevanceScore,
-    origin: c.origin,
-  }));
-
-  const allTexts = sources.map((s) => s.text);
-  const coveredIds = detectCoveredDimensions(allTexts);
-  const gapIds = DIMENSIONS.filter((d) => !coveredIds.includes(d.id)).map(
-    (d) => d.id,
-  );
-  const coveredLabels = DIMENSIONS.filter((d) => coveredIds.includes(d.id)).map(
-    (d) => d.label,
-  );
-  const gapLabels = DIMENSIONS.filter((d) => gapIds.includes(d.id)).map(
-    (d) => d.label,
-  );
+  const indexed = sources.map((s, i) => ({ ...s, index: i + 1 }));
+  const keywords = extractKeywords(topic);
+  const coveredIds = detectCoveredDimensions(indexed.map((s) => s.text));
+  const gapIds = detectGapDimensions(coveredIds).map((d) => d.id);
 
   let aiSynthesis: string | null = null;
   let contradictions: ReadonlyArray<ContradictionEntry> = [];
+  const aiActive = enableAI && indexed.length > 0 && !(abortSignal?.aborted ?? false);
+  if (aiActive) {
+    const coveredLabels = coveredIds.map(labelOf);
+    const gapLabels = gapIds.map(labelOf);
 
-  if (enableAI && sources.length > 0) {
-    const defaultProfile: DepthProfile = {
-      depthRounds: totalRounds,
-      pageBudgetPerWorker: 8,
-      pageBudgetPerGapWorker: 6,
-      defaultContentLimit: 6000,
-      searchResultsPerQuery: 10,
-      maxQueriesPerWorker: 5,
-      maxPagesPerDomain: 4,
-      maxLinksToEvaluate: 50,
-      maxLinksToFollow: 6,
-      maxOutlinksPerPage: 40,
-      candidatePoolMultiplier: 3,
-      workerConcurrency: 3,
-      maxDecompositionWorkers: 8,
-      maxGapFillQueries: 6,
-      ddgRateLimitMs: 2000,
-      minRelevanceScore: 0.13,
-      synthesisMaxSources: 30,
-      synthesisSourceChars: 600,
-      synthesisMaxTokens: 4000,
-      contradictionMaxSources: 20,
-      stagnationThreshold: 1,
-      searchPages: 1,
-      searchLanes: 2,
-      workerFanOut: 1,
-      extraEngines: [],
-      linkCrawlDepth: 1,
-      queryMutationThreshold: 2,
-    };
-    const p = profile ?? defaultProfile;
-
-    const [synthResult, contradResult] = await Promise.all([
-      synthesiseReport(
-        topic,
-        sources,
-        coveredLabels,
-        gapLabels,
-        status,
-        p,
-      ).catch(() => null),
-      detectContradictions(topic, sources, status, p).catch(
-        () => [] as ContradictionEntry[],
-      ),
+    const [synthesisResult, contradictionResult] = await Promise.all([
+      synthesiseReport(topic, indexed, coveredLabels, gapLabels, status, profile, learnings, abortSignal)
+        .catch(() => null),
+      detectContradictions(topic, indexed, status, profile, abortSignal)
+        .catch(() => [] as ContradictionEntry[]),
     ]);
-
-    aiSynthesis = synthResult;
-    contradictions = contradResult;
+    aiSynthesis = synthesisResult;
+    contradictions = contradictionResult;
   }
 
-  const header = buildHeader(
-    topic,
-    sources,
-    totalRounds,
-    usedAI,
-    coveredIds.length,
-    now,
-    !!aiSynthesis,
-  );
-  const coverageTable = buildCoverageTable(coveredIds);
-  const swarmActivity = buildSwarmActivity(sources, queriesUsed);
-  const queryList = buildQueryList(queriesUsed);
-  const consensus = buildConsensus(sources, keywords);
-
-  const sections: string[] = [header, "---"];
-
-  if (aiSynthesis) {
-    sections.push(`## Research Analysis\n\n${aiSynthesis}`);
-    sections.push("---");
+  const sections: string[] = [buildHeader(topic, indexed.length, usedAI, coveredIds.length)];
+  if (partialNotice !== undefined && partialNotice.length > 0) {
+    sections.push(partialNotice, "---");
   }
+  sections.push("---");
 
-  if (contradictions.length > 0) {
-    sections.push(buildContradictions(contradictions));
-    sections.push("---");
+  if (aiSynthesis !== null) sections.push(`## Research Analysis\n\n${aiSynthesis}`, "---");
+
+  if (learnings.length > 0 && aiSynthesis === null) {
+    sections.push(
+      "## Key Learnings\n\n" +
+      learnings.map((l) => `- ${l}`).join("\n"),
+      "---",
+    );
   }
+  if (contradictions.length > 0) sections.push(buildContradictionSection(contradictions), "---");
 
-  sections.push(coverageTable, "---");
-  sections.push(swarmActivity, "---");
-  sections.push(queryList);
-
-  if (consensus) {
-    sections.push("---\n" + consensus);
-  }
-
-  const findings = buildFindings(sources, keywords);
-  sections.push("---", findings, "---");
-
-  sections.push(buildFullSources(sources), "---");
-  sections.push(buildCitationIndex(sources), "---");
   sections.push(
-    "*Generated by LM Studio Deep Research Plugin · Swarm Architecture · Verify important claims with primary sources.*",
+    buildCoverageSection(coveredIds),
+    "---",
+    buildSourcesSection(indexed),
+    "---",
+    renderDiagnostics(ledger.snapshot(totalBudgetOf(profile), ledger.fetched)),
+    "---",
+    `*Generated by DeepResearch v2 · ${indexed.length} sources · ${queriesUsed.length} queries · Verify important claims against primary sources.*`,
   );
 
   return {
     markdown: sections.join("\n\n"),
-    sources,
-    topicKeywords: keywords,
+    sources: indexed,
     coveredDims: coveredIds,
     gapDims: gapIds,
     aiSynthesis: aiSynthesis ?? undefined,
@@ -332,228 +88,59 @@ export async function buildReport(
   };
 }
 
-const STOP_WORDS = new Set([
-  "the",
-  "a",
-  "an",
-  "is",
-  "in",
-  "of",
-  "and",
-  "or",
-  "for",
-  "to",
-  "how",
-  "what",
-  "why",
-  "when",
-  "does",
-  "with",
-  "from",
-  "its",
-]);
-
-function extractKeywordsFromTopic(topic: string): ReadonlyArray<string> {
-  return topic
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, "")
-    .split(/\s+/)
-    .filter((w) => w.length > 2 && !STOP_WORDS.has(w))
-    .slice(0, 8);
+function totalBudgetOf(_profile: DepthProfile): number {
+  // The orchestrator records actual fetches; budget ceiling is informational.
+  return _profile.pagesPerCrawlerRound * Math.max(3, _profile.crawlerCount);
 }
 
 function buildHeader(
   topic: string,
-  sources: ReadonlyArray<ReportSource>,
-  rounds: number,
+  sourceCount: number,
   usedAI: boolean,
-  covered: number,
-  timestamp: string,
-  hasSynthesis: boolean,
+  coverageCount: number,
 ): string {
-  const workerLabels = [...new Set(sources.map((s) => s.workerLabel))];
-  const localCount = sources.filter((s) => s.origin === "local").length;
-  const webCount = sources.length - localCount;
-
-  const sourceLine =
-    localCount > 0
-      ? `> **Total sources:** ${sources.length} (${webCount} web, ${localCount} local)`
-      : `> **Total sources:** ${sources.length}`;
-
   return [
-    `# Deep Research Report: ${esc(topic)}`,
-    ``,
-    `> **Generated:** ${timestamp}`,
-    `> **Architecture:** Swarm (${workerLabels.length} parallel workers)`,
-    `> **Workers:** ${workerLabels.join(", ")}`,
-    `> **Research rounds:** ${rounds}`,
-    sourceLine,
-    `> **AI query planning:** ${usedAI ? " Enabled" : " Fallback (dimension-based)"}`,
-    `> **AI narrative synthesis:** ${hasSynthesis ? " Enabled" : " Structured extraction"}`,
-    `> **Dimension coverage:** ${covered}/${DIMENSIONS.length}`,
+    `# Research Report: ${topic}`,
+    "",
+    `- **Generated:** ${new Date().toUTCString()}`,
+    `- **Sources:** ${sourceCount}`,
+    `- **Dimensions covered:** ${coverageCount}/12`,
+    `- **Planning:** ${usedAI ? "AI-decomposed" : "template-based"}`,
   ].join("\n");
 }
 
-function buildCoverageTable(coveredIds: ReadonlyArray<string>): string {
+function buildContradictionSection(entries: ReadonlyArray<ContradictionEntry>): string {
+  const lines = ["## Contradictions Detected", ""];
+  for (const entry of entries) {
+    lines.push(
+      `### ${entry.claim}`,
+      `- **[${entry.sourceA.index}] ${entry.sourceA.title}**: ${entry.sourceA.stance}`,
+      `- **[${entry.sourceB.index}] ${entry.sourceB.title}**: ${entry.sourceB.stance}`,
+      `- Severity: \`${entry.severity}\``,
+      "",
+    );
+  }
+  return lines.join("\n");
+}
+
+function buildCoverageSection(coveredIds: ReadonlyArray<string>): string {
   const covered = new Set(coveredIds);
-  const rows = DIMENSIONS.map(
-    (d) => `| ${covered.has(d.id) ? "" : ""} | **${d.label}** |`,
-  );
-  return [
-    `## Research Dimension Coverage`,
-    ``,
-    `| | Dimension |`,
-    `|---|-----------|`,
-    ...rows,
-  ].join("\n");
+  const rows = DIMENSIONS.map((dim) =>
+    `| ${covered.has(dim.id) ? "yes" : "—"} | ${dim.label} |`).join("\n");
+  return ["## Dimension Coverage", "", "| Covered | Dimension |", "|---|---|", rows].join("\n");
 }
 
-function buildSwarmActivity(
-  sources: ReadonlyArray<ReportSource>,
-  queries: ReadonlyArray<string>,
-): string {
-  const byLabel = new Map<string, number>();
-  for (const s of sources)
-    byLabel.set(s.workerLabel, (byLabel.get(s.workerLabel) ?? 0) + 1);
-
-  const roleRows = Array.from(byLabel.entries())
-    .map(([label, count]) => `| ${label} | ${count} sources |`)
-    .join("\n");
-
-  return [
-    `## Swarm Activity`,
-    ``,
-    `| Worker | Sources Collected |`,
-    `|--------|------------------|`,
-    roleRows,
-    ``,
-    `**Total queries executed:** ${queries.length}`,
-  ].join("\n");
-}
-
-function buildQueryList(queries: ReadonlyArray<string>): string {
-  const unique = [...new Set(queries)];
-  return [
-    `## Queries Executed`,
-    ``,
-    unique.map((q, i) => `${i + 1}. \`${esc(q)}\``).join("\n"),
-  ].join("\n");
-}
-
-function buildConsensus(
-  sources: ReadonlyArray<ReportSource>,
-  keywords: ReadonlyArray<string>,
-): string | null {
-  const points = detectConsensus(sources, keywords);
-  if (points.length === 0) return null;
-  return [
-    `## Cross-Source Consensus`,
-    ``,
-    `These concepts appeared consistently across multiple independent sources:`,
-    ``,
-    points.map((p) => `- ${p}`).join("\n"),
-  ].join("\n");
-}
-
-function buildContradictions(
-  entries: ReadonlyArray<ContradictionEntry>,
-): string {
-  const SEVERITY_ICONS: Record<string, string> = {
-    minor: "[minor]",
-    moderate: "[moderate]",
-    major: "[major]",
-  };
-
-  const rows = entries.map((e) => {
-    const icon = SEVERITY_ICONS[e.severity] ?? "";
-    return [
-      `### ${icon} ${esc(e.claim)}`,
-      ``,
-      `- **\\[${e.sourceA.index}\\] ${esc(e.sourceA.title)}**: ${esc(e.sourceA.stance)}`,
-      `- **\\[${e.sourceB.index}\\] ${esc(e.sourceB.title)}**: ${esc(e.sourceB.stance)}`,
-      `- **Severity:** ${e.severity}`,
-    ].join("\n");
-  });
-
-  return [
-    `## Cross-Source Contradictions`,
-    ``,
-    `The following disagreements were detected between sources:`,
-    ``,
-    ...rows,
-  ].join("\n\n");
-}
-
-function buildFindings(
-  sources: ReadonlyArray<ReportSource>,
-  keywords: ReadonlyArray<string>,
-): string {
-  const groups = groupByDimension(sources, keywords);
-
-  const sections = groups.map((g) => {
-    const entries = g.entries
-      .map((e) => {
-        const sentences = e.sentences.map((s) => ` > ${esc(s)}`).join("\n");
-        return `**\\[${e.index}\\] ${esc(e.title)}**\n${sentences}`;
-      })
-      .join("\n\n");
-    return `### ${g.label}\n\n${entries}`;
-  });
-
-  return [`## Findings by Research Dimension`, ``, ...sections].join(
-    "\n\n---\n\n",
-  );
-}
-
-function buildFullSources(sources: ReadonlyArray<ReportSource>): string {
-  const entries = sources.map((s) => {
-    const badge = TIER_BADGES[s.tier] ?? "";
-    const originBadge = ORIGIN_BADGES[s.origin] ?? "";
-    const preview = s.text
-      .slice(0, REPORT_SOURCE_PREVIEW_CHARS)
-      .replace(/\n+/g, " ")
-      .trim();
-    const isTruncated = s.text.length > REPORT_SOURCE_PREVIEW_CHARS;
-
-    const meta = [
-      `${badge}${originBadge ? " " + originBadge : ""} **${s.tier}** · Score: ${s.domainScore}/100`,
-      `Relevance: ${(s.relevanceScore * 100).toFixed(0)}%`,
-      s.published ? ` ${s.published}` : null,
-      `~${s.wordCount.toLocaleString()} words`,
-      `Worker: ${s.workerLabel}`,
-      `Query: \`${esc(s.sourceQuery)}\``,
-    ]
-      .filter(Boolean)
-      .join(" · ");
-
-    return [
-      `### \\[${s.index}\\] ${esc(s.title)}`,
-      `<${s.url}>`,
-      ``,
-      meta,
-      ``,
-      `> ${esc(s.description)}`,
-      ``,
-      `<details>`,
-      `<summary>Extracted content (~${s.wordCount.toLocaleString()} words)</summary>`,
-      ``,
-      esc(preview) + (isTruncated ? "\n\n*…truncated…*" : ""),
-      ``,
-      `</details>`,
-    ].join("\n");
-  });
-
-  return [`## Full Source Details`, ``, entries.join("\n\n---\n\n")].join("\n");
-}
-
-function buildCitationIndex(sources: ReadonlyArray<ReportSource>): string {
-  const lines = sources.map((s) => {
-    const originTag = s.origin === "local" ? " [local]" : "";
-    return `**\\[${s.index}\\]** [${esc(s.title)}](${s.url})${s.published ? ` *(${s.published})*` : ""} ${TIER_BADGES[s.tier] ?? ""}${originTag}`;
-  });
-  return [`## Citation Index`, ``, ...lines].join("\n");
-}
-
-function esc(text: string): string {
-  return text.replace(/\[/g, "\\[").replace(/\]/g, "\\]");
+function buildSourcesSection(sources: ReadonlyArray<CrawledSource>): string {
+  const lines = ["## Sources", ""];
+  for (const s of sources) {
+    const originTag = s.origin === "local" ? " `[local]`" : "";
+    const pub = s.published !== null ? ` (${s.published})` : "";
+    lines.push(
+      `**[${s.index}]** [${truncate(s.title, 110)}](${s.url})${pub}${originTag}`,
+      `> rel=${s.relevanceScore.toFixed(2)} · tier=${s.tier} · authority=${s.authorityScore} · ${s.wordCount} words · via ${s.engine}`,
+      `> ${truncate(s.description.replace(/\n+/g, " "), 200)}`,
+      "",
+    );
+  }
+  return lines.join("\n");
 }

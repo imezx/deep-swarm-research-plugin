@@ -1,54 +1,21 @@
 /**
  * @file synthesis/ai.ts
- * AI-powered report synthesis and contradiction detection.
- * Now accepts depth-profile parameters so synthesis scales with depth.
+ * AI synthesis + contradiction detection. Zod-validated, null-safe,
+ * depth-profile scaled.
  */
+import { z } from "zod";
+import type { ContradictionEntry, DepthProfile, CrawledSource as ReportSource } from "../core/types";
+import type { StatusFn } from "../core/types";
+import { callLLMJson, callLLM } from "../core/model";
 
-import { LMStudioClient } from "@lmstudio/sdk";
-import { ReportSource, ContradictionEntry, StatusFn } from "../types";
-import {
-  DepthProfile,
-  AI_SYNTHESIS_TEMPERATURE,
-  AI_SYNTHESIS_TIMEOUT_MS,
-  AI_CONTRADICTION_TEMPERATURE,
-  AI_CONTRADICTION_TIMEOUT_MS,
-  CONTRADICTION_SOURCE_CHARS,
-} from "../constants";
-
-async function callModel(
-  prompt: string,
-  maxTokens: number,
-  temperature: number,
-  timeoutMs: number,
-): Promise<string | null> {
-  try {
-    const client = new LMStudioClient();
-
-    const models = await Promise.race<
-      Awaited<ReturnType<typeof client.llm.listLoaded>>
-    >([
-      client.llm.listLoaded(),
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("timeout")), timeoutMs),
-      ),
-    ]);
-
-    if (!Array.isArray(models) || models.length === 0) return null;
-
-    const model = await client.llm.model(models[0].identifier);
-    const stream = model.respond([{ role: "user", content: prompt }], {
-      maxTokens,
-      temperature,
-    });
-
-    let result = "";
-    for await (const chunk of stream) result += chunk.content ?? "";
-
-    return result.trim() || null;
-  } catch {
-    return null;
-  }
-}
+const CONTRADICTION_SCHEMA = z.object({
+  contradictions: z.array(z.object({
+    claim: z.string().min(10),
+    sourceA: z.object({ index: z.number().int().positive(), stance: z.string() }),
+    sourceB: z.object({ index: z.number().int().positive(), stance: z.string() }),
+    severity: z.enum(["minor", "moderate", "major"]),
+  })).max(12),
+});
 
 function prepareSources(
   sources: ReadonlyArray<ReportSource>,
@@ -59,188 +26,114 @@ function prepareSources(
     .slice(0, maxSources)
     .map((s) => {
       const preview = s.text.slice(0, charsPerSrc).replace(/\n+/g, " ").trim();
-      const pub = s.published ? ` (${s.published})` : "";
-      return `[${s.index}] "${s.title}"${pub} — ${s.tier} (score: ${s.domainScore})\n${preview}`;
+      const pub = s.published !== null ? ` (${s.published})` : "";
+      const originTag = s.origin === "local" ? "[local]" : "";
+      return `[${s.index}]${originTag} "${s.title}"${pub} — ${s.tier}\n${preview}`;
     })
     .join("\n\n");
 }
 
-/**
- * Asks the loaded model to write a coherent, well-structured narrative
- * synthesis of the research findings.
- *
- * Now scales synthesis output size and input sources with depth profile.
- */
 export async function synthesiseReport(
   topic: string,
   sources: ReadonlyArray<ReportSource>,
-  coveredDims: ReadonlyArray<string>,
-  gapDims: ReadonlyArray<string>,
+  coveredLabels: ReadonlyArray<string>,
+  gapLabels: ReadonlyArray<string>,
   status: StatusFn,
   profile: DepthProfile,
+  learnings: ReadonlyArray<string> = [],
+  signal?: AbortSignal,
 ): Promise<string | null> {
   if (sources.length === 0) return null;
 
-  status(
-    `AI synthesis — writing narrative research analysis (${sources.length} sources, up to ${profile.synthesisMaxSources} in prompt)…`,
-  );
-
-  const sourceBlock = prepareSources(
-    sources,
-    profile.synthesisSourceChars,
-    profile.synthesisMaxSources,
-  );
+  status(`AI synthesis — ${sources.length} sources (up to ${profile.synthesisMaxSources} in prompt)…`);
 
   const paragraphHint =
-    sources.length > 50
-      ? "8-15 paragraphs"
-      : sources.length > 20
-        ? "6-10 paragraphs"
-        : "4-8 paragraphs";
+    sources.length > 40 ? "8-12 paragraphs"
+    : sources.length > 15 ? "6-9 paragraphs"
+    : "4-7 paragraphs";
 
-  const prompt = `You are an expert research analyst. Write a comprehensive, well-structured narrative synthesis of these research findings.
+  const prompt = `Write a research analysis of the topic below, based only on the
+provided sources and learnings.
 
 TOPIC: "${topic}"
-TOTAL SOURCES AVAILABLE: ${sources.length}
-DIMENSIONS COVERED: ${coveredDims.join(", ")}
-${gapDims.length > 0 ? `GAPS (not fully covered): ${gapDims.join(", ")}` : "All research dimensions covered."}
-
+DIMENSIONS COVERED: ${coveredLabels.join(", ") || "(none detected)"}
+${gapLabels.length > 0 ? `KNOWN GAPS: ${gapLabels.join(", ")}\n` : ""}${learnings.length > 0 ? `VERIFIED LEARNINGS (high confidence, use as the backbone):\n${learnings.map((l) => `- ${l}`).join("\n")}\n` : ""}
 SOURCES:
-${sourceBlock}
+${prepareSources(sources, profile.synthesisSourceChars, profile.synthesisMaxSources)}
 
-INSTRUCTIONS:
-1. Write ${paragraphHint} of coherent analysis — NOT a list of bullet points
-2. Synthesise thematically: group related findings across sources, don't just summarise each source
-3. Use inline citations like [1], [2], [3] when referencing specific sources
-4. Highlight areas where sources AGREE (consensus) and where they DISAGREE (contradictions)
-5. Note any important limitations or gaps in the available evidence
-6. End with 2-3 key takeaways
-7. Write in a neutral, analytical tone — like a research brief
-8. Do NOT start with "This report" or "This synthesis" — jump straight into the analysis
-9. Be thorough — the user wants comprehensive coverage, not a summary
+Rules:
+- Write ${paragraphHint} of thematic analysis. Do not summarize sources one by one.
+- Lead with specifics: numbers, dates, percentages, prices, sample sizes.
+  Where the sources give them, repeat them exactly; never invent figures.
+- When a set of figures would compare well across categories or over time,
+  add a line like "Chart suggestion: ..." describing the axes.
+- Cite inline as [1], [2], matching the source indexes above.
+- State where sources agree, where they conflict, and what the evidence
+  does not cover.
+- End with 2-3 takeaways that follow from the data.
 
-SYNTHESIS:`;
+ANALYSIS:`;
 
-  const timeoutMs = Math.max(
-    AI_SYNTHESIS_TIMEOUT_MS,
-    AI_SYNTHESIS_TIMEOUT_MS + sources.length * 500,
-  );
-
-  const result = await callModel(
+  const raw = await callLLM(
     prompt,
-    profile.synthesisMaxTokens,
-    AI_SYNTHESIS_TEMPERATURE,
-    timeoutMs,
+    { maxTokens: profile.synthesisMaxTokens, temperature: 0.4, timeoutMs: 180_000, signal },
+    status,
   );
 
-  if (result && result.length > 100) {
-    status(`AI synthesis complete (${result.length} chars)`);
-    return result;
+  if (raw !== null && raw.length > 100) {
+    status(`AI synthesis complete (${raw.length} chars)`);
+    return raw;
   }
-
-  status("AI synthesis unavailable — using structured extraction fallback");
+  status("AI synthesis unavailable — report will use structured extraction");
   return null;
 }
 
-/**
- * Asks the model to identify claims where sources disagree.
- * Now scales with depth profile.
- */
 export async function detectContradictions(
   topic: string,
   sources: ReadonlyArray<ReportSource>,
   status: StatusFn,
   profile: DepthProfile,
+  signal?: AbortSignal,
 ): Promise<ReadonlyArray<ContradictionEntry>> {
-  if (sources.length < 3) return [];
+  if (sources.length < 2) return [];
 
-  status("Checking for cross-source contradictions...");
-
-  const sourceBlock = prepareSources(
-    sources,
-    CONTRADICTION_SOURCE_CHARS,
-    profile.contradictionMaxSources,
-  );
-
-  const maxContradictions = Math.min(
-    10,
-    Math.max(5, Math.floor(sources.length / 5)),
-  );
-
-  const prompt = `You are a fact-checking analyst. Given these research sources on "${topic}", identify any CONTRADICTIONS — places where two sources make conflicting claims about the same thing.
+  const byIndex = new Map(sources.map((s) => [s.index, s]));
+  const result = await callLLMJson(
+    `You are a fact-checker. Identify claims where the sources below DISAGREE on facts, numbers, or causal conclusions about "${topic}".
 
 SOURCES:
-${sourceBlock}
+${prepareSources(sources, profile.synthesisSourceChars, Math.min(profile.synthesisMaxSources, 25))}
 
-For each contradiction found, output ONE line in this exact format:
-CLAIM: <what the disagreement is about> | SOURCE_A: [<index>] <their stance> | SOURCE_B: [<index>] <their stance> | SEVERITY: <minor/moderate/major>
+Schema:
+{"contradictions":[{"claim":"the disputed claim","sourceA":{"index":N,"stance":"what A says"},"sourceB":{"index":M,"stance":"what B says"},"severity":"minor|moderate|major"}]}
 
-Rules:
-- Only report genuine factual contradictions, not stylistic differences
-- SEVERITY: minor = different emphasis, moderate = conflicting data/claims, major = directly opposing conclusions
-- If no contradictions found, output: NONE
-- Maximum ${maxContradictions} contradictions
+Only genuine factual disagreements — different focus is NOT a contradiction. Empty array if none.
 
-OUTPUT:`;
-
-  const raw = await callModel(
-    prompt,
-    Math.max(1500, maxContradictions * 200),
-    AI_CONTRADICTION_TEMPERATURE,
-    AI_CONTRADICTION_TIMEOUT_MS,
+JSON:`,
+    CONTRADICTION_SCHEMA,
+    { maxTokens: 1500, temperature: 0.2, timeoutMs: 120_000, signal },
+    status,
   );
 
-  if (!raw || /^NONE$/im.test(raw.trim())) {
-    status("No contradictions detected");
-    return [];
-  }
+  if (!result.value) return [];
 
-  const entries: ContradictionEntry[] = [];
+  // Keep only contradictions referencing existing source indexes.
+  const valid = result.value.contradictions.filter(
+    (c) => byIndex.has(c.sourceA.index) && byIndex.has(c.sourceB.index),
+  );
 
-  for (const line of raw.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed.startsWith("CLAIM:")) continue;
-
-    try {
-      const claimMatch = /CLAIM:\s*(.+?)\s*\|/.exec(trimmed);
-      const sourceAMatch = /SOURCE_A:\s*\[(\d+)\]\s*(.+?)\s*\|/.exec(trimmed);
-      const sourceBMatch = /SOURCE_B:\s*\[(\d+)\]\s*(.+?)\s*\|/.exec(trimmed);
-      const sevMatch = /SEVERITY:\s*(minor|moderate|major)/i.exec(trimmed);
-
-      if (!claimMatch || !sourceAMatch || !sourceBMatch) continue;
-
-      const idxA = parseInt(sourceAMatch[1], 10);
-      const idxB = parseInt(sourceBMatch[1], 10);
-      const srcA = sources.find((s) => s.index === idxA);
-      const srcB = sources.find((s) => s.index === idxB);
-
-      entries.push({
-        claim: claimMatch[1].trim(),
-        sourceA: {
-          index: idxA,
-          title: srcA?.title ?? `Source ${idxA}`,
-          stance: sourceAMatch[2].trim(),
-        },
-        sourceB: {
-          index: idxB,
-          title: srcB?.title ?? `Source ${idxB}`,
-          stance: sourceBMatch[2].trim(),
-        },
-        severity: (sevMatch?.[1]?.toLowerCase() ?? "minor") as
-          | "minor"
-          | "moderate"
-          | "major",
-      });
-    } catch {
-      continue;
-    }
-  }
-
-  if (entries.length > 0) {
-    status(`${entries.length} contradiction(s) detected`);
-  } else {
-    status("No contradictions detected");
-  }
-
-  return entries;
+  return valid.map((c) => ({
+    claim: c.claim,
+    sourceA: {
+      index: c.sourceA.index,
+      title: byIndex.get(c.sourceA.index)?.title ?? "",
+      stance: c.sourceA.stance,
+    },
+    sourceB: {
+      index: c.sourceB.index,
+      title: byIndex.get(c.sourceB.index)?.title ?? "",
+      stance: c.sourceB.stance,
+    },
+    severity: c.severity,
+  }));
 }

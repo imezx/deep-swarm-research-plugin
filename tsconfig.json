@@ -3,6 +3,7 @@
     "strict": true,
     "module": "CommonJS",
     "target": "ES2021",
+    "lib": ["ES2024", "DOM"],
     "declaration": true,
     "noImplicitOverride": true,
     "sourceMap": true,
