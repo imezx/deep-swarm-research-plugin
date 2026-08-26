@@ -90,19 +90,20 @@ Use this tool when thorough, cited research is needed. Not for simple lookups.`,
           signal,
         );
 
-        const r = result.report;
-        // Plain Markdown with a small stats header — structured JSON wrappers
-        // make small local models echo JSON back instead of using the report.
-        return [
-          `Research complete: ${result.totalSources} sources, ` +
-          `${result.roundsRun} round(s), ${result.queriesUsed.length} queries. ` +
-          `Coverage: ${r.coveredDims.length}/12 dimensions` +
-          (r.contradictions.length > 0 ? `, ${r.contradictions.length} contradiction(s) detected.` : "."),
-          "",
-          "Present the report below to the user as-is; summarize in your own words afterwards.",
-          "",
-          r.markdown,
-        ].join("\n");
+        // Structured metadata plus the full report. The tool description
+        // tells the model to answer in prose, not mirror this shape.
+        return {
+          stats: {
+            topic,
+            totalSources: result.totalSources,
+            roundsRun: result.roundsRun,
+            queriesUsed: result.queriesUsed.length,
+            coveredDimensions: result.report.coveredDims,
+            gapDimensions: result.report.gapDims,
+            contradictionsFound: result.report.contradictions.length,
+          },
+          report: result.report.markdown,
+        };
       } catch (err) {
         if (isAbortError(err) || signal.aborted) return "Research cancelled by user.";
         warn(`Deep research error: ${errorMessage(err)}`);
