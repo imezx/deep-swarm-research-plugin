@@ -27,6 +27,19 @@ export class FetchError extends Error {
   }
 }
 
+/** A search engine responded with an explicit rate limit (HTTP 429). */
+export class RateLimitedError extends Error {
+  readonly engine: string;
+  readonly retryAfterSeconds: number;
+
+  constructor(engine: string, retryAfterSeconds: number) {
+    super(`${engine} rate limited — waiting ~${retryAfterSeconds}s before next attempt`);
+    this.name = "RateLimitedError";
+    this.engine = engine;
+    this.retryAfterSeconds = retryAfterSeconds;
+  }
+}
+
 /** Standard header set — honest UA identifies as a research tool reader. */
 export function readerHeaders(accept = "text/html,application/xhtml+xml;q=0.9,*/*;q=0.5"): Record<string, string> {
   return {

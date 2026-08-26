@@ -2,7 +2,7 @@
  * @file engines/brave.ts
  * Brave Search HTML scrape — supplementary general-scope engine.
  */
-import { searchScrapeHeaders } from "../core/errors";
+import { searchScrapeHeaders, RateLimitedError } from "../core/errors";
 import type { SearchEngine } from "./types";
 import type { SearchHit } from "../core/types";
 import { sleep } from "../core/util";
@@ -90,6 +90,13 @@ export const braveEngine: SearchEngine = {
       signal,
       headers: searchScrapeHeaders("https://search.brave.com/"),
     });
+    if (res.status === 429) {
+      const retryAfter = Number(res.headers.get("retry-after")) || NaN;
+      const seconds = Number.isFinite(retryAfter)
+        ? retryAfter
+        : 30 + Math.floor(Math.random() * 30);
+      throw new RateLimitedError("brave", seconds);
+    }
     if (!res.ok) throw new Error(`brave HTTP ${res.status}`);
 
     return parseBraveResults(await res.text(), limit).map((b) => ({

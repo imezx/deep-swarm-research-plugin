@@ -72,6 +72,11 @@ export class RunLedger {
     this.engine(id).breakerOpens++;
   }
 
+  /** Called once when a breaker opens — visible in the stream, not spammed. */
+  noteBreakerOpen(id: EngineId, reason: string): void {
+    this.status(`${id} paused: ${reason} — will retry later in the run`);
+  }
+
   note(message: string): void {
     this.status(`  · ${message}`);
   }
