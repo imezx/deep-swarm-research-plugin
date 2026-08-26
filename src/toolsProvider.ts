@@ -45,9 +45,13 @@ deduplicated before acceptance against a global page budget. Uncovered
 research dimensions trigger follow-up rounds until the budget, coverage, or
 time limit is reached.
 
-The returned report includes an AI-written analysis with inline citations
-(when a model is loaded), detected contradictions between sources, a coverage
-table, the source list with metadata, and engine diagnostics for the run.
+The result is a Markdown report: written analysis with inline citations
+(when a model is loaded), detected contradictions, a coverage table, the
+source list with metadata, and engine diagnostics for the run.
+
+Always call this tool before answering a research question — never compose a
+research answer from memory alone. After the tool returns, answer the user in
+plain prose or Markdown based on the report. Do not reply with JSON.
 
 Use this tool when thorough, cited research is needed. Not for simple lookups.`,
     parameters: {
@@ -86,17 +90,19 @@ Use this tool when thorough, cited research is needed. Not for simple lookups.`,
           signal,
         );
 
-        return {
-          topic,
-          totalRounds: result.roundsRun,
-          totalSources: result.totalSources,
-          queriesUsed: result.queriesUsed,
-          coveredDimensions: result.report.coveredDims,
-          gapDimensions: result.report.gapDims,
-          hasAISynthesis: result.report.aiSynthesis !== undefined,
-          contradictionsFound: result.report.contradictions.length,
-          report: result.report.markdown,
-        };
+        const r = result.report;
+        // Plain Markdown with a small stats header — structured JSON wrappers
+        // make small local models echo JSON back instead of using the report.
+        return [
+          `Research complete: ${result.totalSources} sources, ` +
+          `${result.roundsRun} round(s), ${result.queriesUsed.length} queries. ` +
+          `Coverage: ${r.coveredDims.length}/12 dimensions` +
+          (r.contradictions.length > 0 ? `, ${r.contradictions.length} contradiction(s) detected.` : "."),
+          "",
+          "Present the report below to the user as-is; summarize in your own words afterwards.",
+          "",
+          r.markdown,
+        ].join("\n");
       } catch (err) {
         if (isAbortError(err) || signal.aborted) return "Research cancelled by user.";
         warn(`Deep research error: ${errorMessage(err)}`);
